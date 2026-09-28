@@ -1,40 +1,12 @@
 {
   "version": "7",
-  "dialect": "mysql",
+  "dialect": "postgresql",
   "entries": [
     {
       "idx": 0,
-      "version": "5",
-      "when": 1790518605103,
-      "tag": "0000_keen_dragon_man",
-      "breakpoints": true
-    },
-    {
-      "idx": 1,
-      "version": "5",
-      "when": 1790518814390,
-      "tag": "0001_blue_meltdown",
-      "breakpoints": true
-    },
-    {
-      "idx": 2,
-      "version": "5",
-      "when": 1790521865332,
-      "tag": "0002_workable_vengeance",
-      "breakpoints": true
-    },
-    {
-      "idx": 3,
-      "version": "5",
-      "when": 1790522173991,
-      "tag": "0003_young_betty_ross",
-      "breakpoints": true
-    },
-    {
-      "idx": 4,
-      "version": "5",
-      "when": 1790522414756,
-      "tag": "0004_minor_lenny_balinger",
+      "version": "7",
+      "when": 1790617225598,
+      "tag": "0000_elite_skreet",
       "breakpoints": true
     }
   ]

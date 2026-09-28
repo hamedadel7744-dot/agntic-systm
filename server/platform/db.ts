@@ -74,7 +74,7 @@ export async function chargeUsage(tenantId: string, tokens: number, toolCalls = 
   if (next > tenant.hardCap) return { allowed: false, reason: "hard_cap_reached", message: "تم إيقاف الطلب لأن الحساب وصل إلى الحد الأقصى 120% من الباقة.", used: tenant.tokenUsedThisCycle, quota: tenant.tokenQuota, cap: tenant.hardCap };
   await db.update(platformTenants).set({ tokenUsedThisCycle: next }).where(eq(platformTenants.id, tenantId));
   const usageId = `${tenantId}-${tenant.billingCycleStart.getTime()}`;
-  await db.insert(platformUsage).values({ id: usageId, tenantId, cycleStart: tenant.billingCycleStart, cycleEnd: new Date(tenant.billingCycleStart.getTime() + 30 * 86400000), tokens, requests: 1, toolCalls }).onDuplicateKeyUpdate({ set: { tokens: sql`${platformUsage.tokens} + ${tokens}`, requests: sql`${platformUsage.requests} + 1`, toolCalls: sql`${platformUsage.toolCalls} + ${toolCalls}` } });
+  await db.insert(platformUsage).values({ id: usageId, tenantId, cycleStart: tenant.billingCycleStart, cycleEnd: new Date(tenant.billingCycleStart.getTime() + 30 * 86400000), tokens, requests: 1, toolCalls }).onConflictDoUpdate({ target: platformUsage.id, set: { tokens: sql`${platformUsage.tokens} + ${tokens}`, requests: sql`${platformUsage.requests} + 1`, toolCalls: sql`${platformUsage.toolCalls} + ${toolCalls}` } });
   return { allowed: true, used: next, quota: tenant.tokenQuota, cap: tenant.hardCap, warning: next >= tenant.tokenQuota * 0.8, overageTokens: Math.max(0, next - tenant.tokenQuota) };
 }
 
