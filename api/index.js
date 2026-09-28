@@ -1,4 +1,4 @@
-import { buildApp } from "../server/_core/app";
+import { buildApp } from "../dist-server/app.mjs";
 
 const app = buildApp();
 
