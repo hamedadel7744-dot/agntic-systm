@@ -212,10 +212,13 @@ const normalizeToolChoice = (
   return toolChoice;
 };
 
-const resolveApiUrl = () =>
-  ENV.forgeApiUrl && ENV.forgeApiUrl.trim().length > 0
-    ? `${ENV.forgeApiUrl.replace(/\/$/, "")}/v1/chat/completions`
-    : "https://forge.manus.im/v1/chat/completions";
+/** Base URL of the OpenAI-compatible provider; tolerates a trailing "/v1" pasted by users. */
+export const getLlmApiBase = () => {
+  const raw = ENV.forgeApiUrl?.trim() || "https://forge.manus.im";
+  return raw.replace(/\/+$/, "").replace(/\/v1$/, "");
+};
+
+const resolveApiUrl = () => `${getLlmApiBase()}/v1/chat/completions`;
 
 const assertApiKey = () => {
   if (!ENV.forgeApiKey) {
@@ -299,15 +302,34 @@ const computeBackoffDelay = (
 
 // Retries non-2xx responses and network errors with exponential backoff, then
 // returns the final Response so callers keep their existing error handling.
+// A per-attempt timeout plus a total budget guarantees the call finishes well
+// inside a serverless function lifetime instead of being killed mid-run and
+// leaving a zombie "running" row behind.
+const LLM_ATTEMPT_TIMEOUT_MS = 20_000;
+const LLM_TOTAL_BUDGET_MS = 45_000;
+
 const fetchWithBackoff = async (
   url: string,
   init: FetchInit
 ): Promise<Response> => {
   let lastError: unknown;
+  const startedAt = Date.now();
 
   for (let attempt = 0; attempt <= RETRY_MAX_RETRIES; attempt++) {
+    const remainingMs = LLM_TOTAL_BUDGET_MS - (Date.now() - startedAt);
+    if (remainingMs <= 0) {
+      throw new Error(
+        `LLM request exceeded its total time budget of ${LLM_TOTAL_BUDGET_MS}ms`
+      );
+    }
+    const attemptSignal = AbortSignal.timeout(
+      Math.min(LLM_ATTEMPT_TIMEOUT_MS, remainingMs)
+    );
+    const signal = init.signal
+      ? AbortSignal.any([init.signal, attemptSignal])
+      : attemptSignal;
     try {
-      const response = await fetch(url, init);
+      const response = await fetch(url, { ...init, signal });
       if (response.ok || attempt === RETRY_MAX_RETRIES) {
         return response;
       }
@@ -323,14 +345,24 @@ const fetchWithBackoff = async (
       console.warn(
         `LLM request retry ${attempt + 1}/${RETRY_MAX_RETRIES} after status ${response.status}`
       );
-      await sleep(computeBackoffDelay(attempt, retryAfterMs));
+      const delay = computeBackoffDelay(attempt, retryAfterMs);
+      if (Date.now() - startedAt + delay > LLM_TOTAL_BUDGET_MS) {
+        throw new Error(
+          `LLM request exceeded its total time budget of ${LLM_TOTAL_BUDGET_MS}ms`
+        );
+      }
+      await sleep(delay);
     } catch (error) {
       lastError = error;
       if (attempt === RETRY_MAX_RETRIES) throw error;
       console.warn(
         `LLM request retry ${attempt + 1}/${RETRY_MAX_RETRIES} after network error`
       );
-      await sleep(computeBackoffDelay(attempt));
+      const delay = computeBackoffDelay(attempt);
+      if (Date.now() - startedAt + delay > LLM_TOTAL_BUDGET_MS) {
+        break;
+      }
+      await sleep(delay);
     }
   }
 

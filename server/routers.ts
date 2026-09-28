@@ -4,7 +4,7 @@ import { getSessionCookieOptions } from "./_core/cookies";
 import { invokeLLM } from "./_core/llm";
 import { systemRouter } from "./_core/systemRouter";
 import { adminProcedure, publicProcedure, router } from "./_core/trpc";
-import { addAuditLog, createTicket, getDashboardSnapshot, listKnowledgeSources, listSystems, listTickets } from "./db";
+import { addAuditLog, createTicket, getDashboardSnapshot, getDb, listKnowledgeSources, listSystems, listTickets } from "./db";
 import { addKnowledge, createAgent, createConnector, createTenant, createTenantApiKey, findTenantByApiKey, listConnectors, listPlatformOverview } from "./platform/db";
 import { runDiagnostics } from "./platform/diagnostics";
 import { executeRun, listPlatformTools } from "./platform/runtime";
@@ -24,7 +24,7 @@ export const appRouter = router({
   system: systemRouter,
   diagnostics: router({
     // public by design: the report contains statuses, latencies and error text only — never secret values
-    report: publicProcedure.query(() => runDiagnostics()),
+    report: publicProcedure.input(z.object({ force: z.boolean().optional() }).optional()).query(({ input }) => runDiagnostics({ force: input?.force })),
   }),
   auth: router({
     me: publicProcedure.query(opts => opts.ctx.user),
@@ -67,8 +67,11 @@ export const appRouter = router({
     connectors: adminProcedure.input(z.object({ tenantId: z.string().uuid() })).query(({ input }) => listConnectors(input.tenantId)),
     createConnector: adminProcedure.input(z.object({ tenantId: z.string().uuid(), name: z.string().min(2), kind: z.enum(["rest", "graphql", "mcp", "webhook", "internal"]).optional(), baseUrl: z.string().url().optional().or(z.literal("")), capabilities: z.array(z.string()).min(1), secretRef: z.string().optional() })).mutation(({ input }) => createConnector({ ...input, baseUrl: input.baseUrl || undefined })),
     createAgent: adminProcedure.input(z.object({ tenantId: z.string().uuid(), name: z.string().min(2), description: z.string().optional(), systemPrompt: z.string().min(10) })).mutation(({ input }) => createAgent(input)),
-    addKnowledge: adminProcedure.input(z.object({ tenantId: z.string().uuid(), agentId: z.string().uuid(), title: z.string().min(2), content: z.string().min(10), sourceType: z.enum(["doc", "faq", "url"]).optional() })).mutation(({ input }) => addKnowledge(input)),
-    run: publicProcedure.input(z.object({ apiKey: z.string().min(10), agentId: z.string().uuid(), input: z.string().min(1), conversationId: z.string().uuid().optional(), externalSessionId: z.string().max(255).optional() })).mutation(async ({ input }) => {
+    addKnowledge: adminProcedure.input(z.object({ tenantId: z.string().uuid(), agentId: z.string().uuid(), title: z.string().min(2).max(200), content: z.string().min(10).max(200000), sourceType: z.enum(["doc", "faq", "url"]).optional() })).mutation(({ input }) => addKnowledge(input)),
+    run: publicProcedure.input(z.object({ apiKey: z.string().min(10), agentId: z.string().uuid(), input: z.string().min(1).max(8000), conversationId: z.string().uuid().optional(), externalSessionId: z.string().max(255).optional() })).mutation(async ({ input }) => {
+      // Loud failure only when the DB is configured but unreachable; in demo mode
+      // (no DATABASE_URL) the key check below still runs and demo behavior applies.
+      if (process.env.DATABASE_URL && !(await getDb())) return { status: "failed" as const, answer: "قاعدة البيانات مضبوطة لكن غير قابلة للوصول الآن؛ الطلب مرفوض صراحة بدل الفشل الصامت. افتح صفحة صحة النظام للتفاصيل.", runId: "", traceId: "", tokensUsed: 0, toolCalls: 0 };
       const resolved = await findTenantByApiKey(input.apiKey);
       if (!resolved) return { status: "failed" as const, answer: "مفتاح API غير صالح أو tenant غير نشط.", runId: "", traceId: "", tokensUsed: 0, toolCalls: 0 };
       return executeRun({ tenantId: resolved.tenant.id, agentId: input.agentId, input: input.input, conversationId: input.conversationId });

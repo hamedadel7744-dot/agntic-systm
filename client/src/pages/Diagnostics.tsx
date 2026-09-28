@@ -6,6 +6,7 @@ import {
   Activity, AlertTriangle, ArrowLeft, Bot, CheckCircle2, Clock3, Database, KeyRound,
   RefreshCw, Server, ShieldAlert, Wrench, XCircle,
 } from "lucide-react";
+import { useEffect, useState } from "react";
 import type { CheckStatus, DiagCheck, DiagnosticsReport } from "../../../server/platform/diagnostics";
 
 const GROUP_LABELS: Record<DiagCheck["group"], string> = {
@@ -39,7 +40,11 @@ function formatTime(iso: string) {
 }
 
 export default function Diagnostics() {
-  const report = trpc.diagnostics.report.useQuery(undefined, { refetchInterval: 20000 });
+  const [manual, setManual] = useState(false);
+  const report = trpc.diagnostics.report.useQuery({ force: manual }, { refetchInterval: manual ? false : 20000 });
+  useEffect(() => {
+    if (manual && !report.isFetching) setManual(false);
+  }, [manual, report.isFetching]);
   const data: DiagnosticsReport | undefined = report.data;
 
   const counts = { ok: 0, warn: 0, fail: 0 };
@@ -92,6 +97,7 @@ export default function Diagnostics() {
                 <div className="flex flex-wrap items-center gap-2 text-[11px] font-bold text-[#526079]">
                   <Badge className="border-0 bg-white text-[10px] text-[#526079]"><Clock3 className="ml-1 h-3 w-3" />آخر فحص: {formatTime(data.checkedAt)}</Badge>
                   <Badge className="border-0 bg-white text-[10px] text-[#526079]">مدة الفحص {data.durationMs}ms</Badge>
+                  {data.cached && <Badge className="border-0 bg-white text-[10px] text-[#9aa6b6]">نتيجة مخزنة (أقل من 10 ثوانٍ)</Badge>}
                   <Badge className="border-0 bg-white text-[10px] text-[#526079]">تحديث تلقائي كل 20 ثانية</Badge>
                 </div>
               </div>
@@ -145,9 +151,20 @@ export default function Diagnostics() {
                 <CardTitle className="flex items-center gap-2 text-base font-black"><ShieldAlert className="h-4 w-4 text-[#b06f1f]" />آخر الحوادث المسجلة</CardTitle>
               </CardHeader>
               <CardContent className="space-y-3">
-                {data.incidents.failedRuns.length === 0 && data.incidents.usageWarnings.length === 0 && (
-                  <p className="text-xs text-[#98a4b5]">لا توجد حوادث مسجلة — لا failed runs ولا تحذيرات استخدام.</p>
+                {data.incidents.failedRuns.length === 0 && data.incidents.usageWarnings.length === 0 && data.incidents.staleRuns.length === 0 && (
+                  <p className="text-xs text-[#98a4b5]">لا توجد حوادث مسجلة — لا failed runs ولا runs معلقة ولا تحذيرات استخدام.</p>
                 )}
+                {data.incidents.staleRuns.map(incident => (
+                  <div key={incident.id} className={`rounded-2xl border p-4 ${STATUS_META.warn.bg} ${STATUS_META.warn.border}`}>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className={`flex items-center gap-1 text-xs font-black ${STATUS_META.warn.text}`}><AlertTriangle className="h-3.5 w-3.5" />تشغيل معلّق — زومبي محتمل</span>
+                      <span className="text-[10px] text-[#98a4b5]">{formatTime(incident.createdAt)}</span>
+                    </div>
+                    <p className="mt-2 text-xs leading-6 text-[#526079]">{incident.error}</p>
+                    <p className="mt-1 text-[11px] leading-5 text-[#198a6a]">الإصلاح: العملية اتقضت عليها قبل ما تسجل فشل (timeout أو kill). راجع فحص الوصول لمزود النموذج، ثم أعد المحاولة — والحالة هتتقفل أوتوماتيك مع التحقق اللاحق.</p>
+                    <code dir="ltr" className="mt-1 block text-[10px] text-[#98a4b5]">{incident.id}</code>
+                  </div>
+                ))}
                 {data.incidents.failedRuns.map(incident => (
                   <div key={incident.id} className={`rounded-2xl border p-4 ${STATUS_META.fail.bg} ${STATUS_META.fail.border}`}>
                     <div className="flex flex-wrap items-center justify-between gap-2">

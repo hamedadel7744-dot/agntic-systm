@@ -4,7 +4,7 @@ import { executeRun, listPlatformTools } from "./runtime";
 import { findTenantByApiKey } from "./db";
 import { getDb } from "../db";
 
-const runSchema = z.object({ agentId: z.string().uuid(), input: z.string().min(1), conversationId: z.string().uuid().optional(), externalSessionId: z.string().max(255).optional(), metadata: z.record(z.string(), z.unknown()).optional() });
+const runSchema = z.object({ agentId: z.string().uuid(), input: z.string().min(1).max(8000), conversationId: z.string().uuid().optional(), externalSessionId: z.string().max(255).optional(), metadata: z.record(z.string(), z.unknown()).optional() });
 
 function readApiKey(req: Request) {
   const direct = req.header("x-api-key");
@@ -24,9 +24,11 @@ export function registerPlatformHttp(app: Express) {
   app.get("/v1/health", (_req, res) => res.json({ ok: true, service: "nova-agent-platform", version: "v1" }));
   app.get("/v1/tools", (_req, res) => res.json({ data: listPlatformTools() }));
   app.post("/v1/runs", async (req: Request, res: Response) => {
-    // Loud failure: an unreachable database must never masquerade as an invalid API key.
-    if (!(await getDb())) {
-      return res.status(503).json({ error: { code: "storage_unavailable", message: "قاعدة البيانات غير متاحة الآن؛ الطلب مرفوض صراحة بدل الفشل الصامت." } });
+    // Loud failure only when the DB is configured but unreachable — an unreachable
+    // database must never masquerade as an invalid API key. In demo mode (no
+    // DATABASE_URL) the key check below runs and demo behavior applies.
+    if (process.env.DATABASE_URL && !(await getDb())) {
+      return res.status(503).json({ error: { code: "storage_unavailable", message: "قاعدة البيانات مضبوطة لكن غير قابلة للوصول الآن؛ الطلب مرفوض صراحة بدل الفشل الصامت." } });
     }
     const key = readApiKey(req);
     const resolved = await findTenantByApiKey(key);

@@ -1,6 +1,8 @@
 import { desc, eq, sql, and, inArray } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
 import { getDb } from "../db";
 import { ENV } from "../_core/env";
+import { getLlmApiBase } from "../_core/llm";
 import { platformEvents, platformRuns } from "../../drizzle/schema";
 import { listPlatformTools } from "./runtime";
 import "./default-tools";
@@ -36,10 +38,11 @@ export interface DiagnosticsReport {
   status: CheckStatus;
   checkedAt: string;
   durationMs: number;
+  cached: boolean;
   meta: { node: string; region: string; uptimeSec: number; dbConfigured: boolean };
   checks: DiagCheck[];
   envAudit: EnvAuditItem[];
-  incidents: { failedRuns: Incident[]; failedRuns24h: number; usageWarnings: Incident[] };
+  incidents: { failedRuns: Incident[]; failedRuns24h: number; usageWarnings: Incident[]; staleRuns: Incident[] };
 }
 
 /** Expected platform tables after the Postgres migration (drizzle/0000). */
@@ -142,11 +145,14 @@ async function runDbChecks(checks: DiagCheck[], dbConfigured: boolean): Promise<
   });
   checks.push(vector);
 
-  const writes = await timeCheck("db.write_path", "database", "قدرة الكتابة الفعلية على الجداول", async () => {
-    // Read-only round trip on the hottest platform tables; proves grants and schema together.
-    await db.select({ id: platformRuns.id }).from(platformRuns).limit(1);
-    await db.select({ id: platformEvents.id }).from(platformEvents).limit(1);
-    return { status: "ok", detail: "قراءة سليمة من platformRuns وplatformEvents (صلاحيات المستخدم وسليمتين)." };
+  const writes = await timeCheck("db.write_path", "database", "قدرة الكتابة والحذف الفعلية على الجداول", async () => {
+    // A real write probe: insert a heartbeat event then delete it. Read-only checks
+    // cannot prove INSERT/DELETE grants, and claiming writes without proving them
+    // would be its own kind of silent failure.
+    const probeId = randomUUID();
+    await db.insert(platformEvents).values({ id: probeId, tenantId: "__diagnostics__", eventType: "diag.write_probe", payload: "{}" });
+    await db.delete(platformEvents).where(eq(platformEvents.id, probeId));
+    return { status: "ok", detail: "إدراج وحذف فعلي في platformEvents نجح — صلاحيات الكتابة سليمة." };
   });
   checks.push(writes);
   return true;
@@ -169,8 +175,7 @@ async function runLlmChecks(checks: DiagCheck[]): Promise<void> {
   }
   checks.push({ id: "llm.config", group: "llm", title: "مفتاح النموذج اللغوي", status: "ok", detail: "المفتاح موجود في البيئة." });
   const reach = await timeCheck("llm.reachability", "llm", "الوصول لمزود النموذج", async () => {
-    const base = (ENV.forgeApiUrl?.trim() || "https://forge.manus.im").replace(/\/$/, "");
-    const response = await fetch(`${base}/v1/models`, { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(5000) });
+    const response = await fetch(`${getLlmApiBase()}/v1/models`, { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(5000) });
     if (response.status === 401 || response.status === 403) {
       return { status: "fail", detail: `المزود رفض المفتاح (HTTP ${response.status}).`, cause: "مفتاح غير صالح أو منتهي.", fix: "حدّث BUILT_IN_FORGE_API_KEY بمفتاح صالح." };
     }
@@ -180,22 +185,39 @@ async function runLlmChecks(checks: DiagCheck[]): Promise<void> {
 }
 
 async function collectIncidents(dbAvailable: boolean): Promise<DiagnosticsReport["incidents"]> {
-  if (!dbAvailable) return { failedRuns: [], failedRuns24h: 0, usageWarnings: [] };
+  if (!dbAvailable) return { failedRuns: [], failedRuns24h: 0, usageWarnings: [], staleRuns: [] };
   const db = (await getDb())!;
   const since = new Date(Date.now() - 24 * 3600 * 1000);
-  const [failed, failedCount, warnings] = await Promise.all([
+  const staleCutoff = new Date(Date.now() - 15 * 60 * 1000);
+  const [failed, failedCount, warnings, stale] = await Promise.all([
     db.select({ id: platformRuns.id, error: platformRuns.error, createdAt: platformRuns.createdAt }).from(platformRuns).where(eq(platformRuns.status, "failed")).orderBy(desc(platformRuns.createdAt)).limit(10),
     db.select({ count: sql<number>`count(*)::int` }).from(platformRuns).where(and(eq(platformRuns.status, "failed"), sql`${platformRuns.createdAt} > ${since}`)),
     db.select({ id: platformEvents.id, error: platformEvents.eventType, createdAt: platformEvents.createdAt }).from(platformEvents).where(inArray(platformEvents.eventType, ["usage.warning_80", "usage.overage"])).orderBy(desc(platformEvents.createdAt)).limit(5),
+    // Runs stuck in running/waiting_approval are zombies: the process was killed
+    // mid-run (timeout/OOM) and no catch block ever got to mark them failed.
+    db.select({ id: platformRuns.id, error: platformRuns.error, createdAt: platformRuns.createdAt }).from(platformRuns).where(and(inArray(platformRuns.status, ["running", "waiting_approval"]), sql`${platformRuns.createdAt} < ${staleCutoff}`)).orderBy(desc(platformRuns.createdAt)).limit(10),
   ]);
   return {
     failedRuns: failed.map(row => ({ id: row.id, error: row.error ?? "بدون رسالة خطأ", createdAt: row.createdAt.toISOString() })),
     failedRuns24h: failedCount[0]?.count ?? 0,
     usageWarnings: warnings.map(row => ({ id: row.id, error: row.error, createdAt: row.createdAt.toISOString() })),
+    staleRuns: stale.map(row => ({ id: row.id, error: row.error ?? "الحالة الحالية: running/waiting_approval منذ أكثر من 15 دقيقة", createdAt: row.createdAt.toISOString() })),
   };
 }
 
-export async function runDiagnostics(): Promise<DiagnosticsReport> {
+const CACHE_TTL_MS = 10_000;
+let cachedReport: { at: number; report: DiagnosticsReport } | null = null;
+
+export async function runDiagnostics(options: { force?: boolean } = {}): Promise<DiagnosticsReport> {
+  if (!options.force && cachedReport && Date.now() - cachedReport.at < CACHE_TTL_MS) {
+    return { ...cachedReport.report, cached: true };
+  }
+  const report = await computeDiagnostics();
+  cachedReport = { at: Date.now(), report };
+  return { ...report, cached: false };
+}
+
+async function computeDiagnostics(): Promise<DiagnosticsReport> {
   const started = performance.now();
   const checks: DiagCheck[] = [];
   const dbConfigured = Boolean(process.env.DATABASE_URL);
@@ -227,11 +249,11 @@ export async function runDiagnostics(): Promise<DiagnosticsReport> {
     fix: item.fix,
   })));
 
-  let incidents: DiagnosticsReport["incidents"] = { failedRuns: [], failedRuns24h: 0, usageWarnings: [] };
+  let incidents: DiagnosticsReport["incidents"] = { failedRuns: [], failedRuns24h: 0, usageWarnings: [], staleRuns: [] };
   try {
     incidents = await collectIncidents(dbAvailable);
   } catch {
-    incidents = { failedRuns: [], failedRuns24h: 0, usageWarnings: [] };
+    incidents = { failedRuns: [], failedRuns24h: 0, usageWarnings: [], staleRuns: [] };
   }
 
   const hasFail = checks.some(check => check.status === "fail");
@@ -242,6 +264,7 @@ export async function runDiagnostics(): Promise<DiagnosticsReport> {
     status,
     checkedAt: new Date().toISOString(),
     durationMs: Math.round(performance.now() - started),
+    cached: false,
     meta: {
       node: process.version,
       region: process.env.VERCEL_REGION ?? "local",

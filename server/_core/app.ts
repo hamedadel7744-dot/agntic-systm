@@ -14,6 +14,10 @@ import { createContext } from "./context";
  * safe to import inside a serverless bundle.
  */
 export function buildApp() {
+  const missingCritical = ["DATABASE_URL", "JWT_SECRET", "BUILT_IN_FORGE_API_KEY"].filter(key => !process.env[key]);
+  if (missingCritical.length > 0) {
+    console.error(`[startup] Missing critical env vars: ${missingCritical.join(", ")} — /api/system/health يوضح الأثر والإصلاح لكل واحد.`);
+  }
   const app = express();
   // Configure body parser with larger size limit for file uploads
   app.use(express.json({ limit: "50mb" }));
@@ -21,8 +25,18 @@ export function buildApp() {
   registerStorageProxy(app);
   registerOAuthRoutes(app);
   registerPlatformHttp(app);
-  // deep health report for uptime monitors and the diagnostics dashboard
-  app.get(["/api/system/health", "/v1/system/health"], async (_req, res) => {
+  // deep health report for uptime monitors and the diagnostics dashboard.
+  // The report itself is cached for 10s inside runDiagnostics; this limiter only
+  // stops someone hammering the endpoint to exhaust pooler connections.
+  const healthHits = new Map<string, { count: number; resetAt: number }>();
+  app.get(["/api/system/health", "/v1/system/health"], async (req, res) => {
+    const ip = String(req.headers["x-forwarded-for"] ?? "").split(",")[0].trim() || req.ip || "unknown";
+    const nowMs = Date.now();
+    const bucket = healthHits.get(ip);
+    if (!bucket || bucket.resetAt < nowMs) healthHits.set(ip, { count: 1, resetAt: nowMs + 60_000 });
+    else if (++bucket.count > 60) {
+      return res.status(429).json({ error: { code: "rate_limited", message: "طلبات فحص كثيرة جدًا؛ تمهّل ثانية." } });
+    }
     res.json(await runDiagnostics());
   });
   // tRPC API

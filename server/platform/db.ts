@@ -17,6 +17,10 @@ export async function findTenantByApiKey(rawKey: string) {
   if (!db) return undefined;
   const keyHash = hashApiKey(rawKey);
   const rows = await db.select({ tenant: platformTenants, apiKey: platformApiKeys }).from(platformApiKeys).innerJoin(platformTenants, eq(platformApiKeys.tenantId, platformTenants.id)).where(and(eq(platformApiKeys.keyHash, keyHash), sql`${platformApiKeys.revokedAt} IS NULL`, eq(platformTenants.status, "active"))).limit(1);
+  if (rows[0]) {
+    // fire-and-forget: key usage telemetry must never block or fail the request
+    db.update(platformApiKeys).set({ lastUsedAt: new Date() }).where(eq(platformApiKeys.id, rows[0].apiKey.id)).catch(() => {});
+  }
   return rows[0];
 }
 
@@ -65,17 +69,28 @@ export async function recordEvent(input: { tenantId: string; runId?: string; typ
   await db.insert(platformEvents).values({ id: newId(), tenantId: input.tenantId, runId: input.runId, eventType: input.type, payload: safeJson(input.payload), traceId: input.traceId });
 }
 
+const BILLING_CYCLE_MS = 30 * 86400000;
+
 export async function chargeUsage(tenantId: string, tokens: number, toolCalls = 0) {
   const db = await getDb();
   if (!db) return { allowed: true, used: tokens, quota: 100000, cap: 120000, warning: false, overageTokens: 0 };
-  const tenant = (await db.select().from(platformTenants).where(eq(platformTenants.id, tenantId)).limit(1))[0];
-  if (!tenant) return { allowed: false, reason: "tenant_not_found" };
-  const next = tenant.tokenUsedThisCycle + tokens;
-  if (next > tenant.hardCap) return { allowed: false, reason: "hard_cap_reached", message: "تم إيقاف الطلب لأن الحساب وصل إلى الحد الأقصى 120% من الباقة.", used: tenant.tokenUsedThisCycle, quota: tenant.tokenQuota, cap: tenant.hardCap };
-  await db.update(platformTenants).set({ tokenUsedThisCycle: next }).where(eq(platformTenants.id, tenantId));
-  const usageId = `${tenantId}-${tenant.billingCycleStart.getTime()}`;
-  await db.insert(platformUsage).values({ id: usageId, tenantId, cycleStart: tenant.billingCycleStart, cycleEnd: new Date(tenant.billingCycleStart.getTime() + 30 * 86400000), tokens, requests: 1, toolCalls }).onConflictDoUpdate({ target: platformUsage.id, set: { tokens: sql`${platformUsage.tokens} + ${tokens}`, requests: sql`${platformUsage.requests} + 1`, toolCalls: sql`${platformUsage.toolCalls} + ${toolCalls}` } });
-  return { allowed: true, used: next, quota: tenant.tokenQuota, cap: tenant.hardCap, warning: next >= tenant.tokenQuota * 0.8, overageTokens: Math.max(0, next - tenant.tokenQuota) };
+  const current = (await db.select().from(platformTenants).where(eq(platformTenants.id, tenantId)).limit(1))[0];
+  if (!current) return { allowed: false, reason: "tenant_not_found" };
+  const now = new Date();
+  const cycleExpired = now.getTime() - current.billingCycleStart.getTime() >= BILLING_CYCLE_MS;
+  // Atomic increment via SQL: a read-modify-write here loses tokens under concurrency.
+  // Tokens were really spent, so the cap is enforced AFTER incrementing (no refund).
+  const updated = await db.update(platformTenants).set(
+    cycleExpired
+      ? { billingCycleStart: now, tokenUsedThisCycle: tokens }
+      : { tokenUsedThisCycle: sql`${platformTenants.tokenUsedThisCycle} + ${tokens}` }
+  ).where(eq(platformTenants.id, tenantId)).returning({ used: platformTenants.tokenUsedThisCycle, quota: platformTenants.tokenQuota, cap: platformTenants.hardCap, cycleStart: platformTenants.billingCycleStart });
+  const row = updated[0];
+  if (!row) return { allowed: false, reason: "tenant_not_found" };
+  if (row.used > row.cap) return { allowed: false, reason: "hard_cap_reached", message: `تم إيقاف الطلب لأن الحساب تجاوز السقف النهائي المسموح (${row.cap} توكن في الدورة).`, used: row.used, quota: row.quota, cap: row.cap };
+  const usageId = `${tenantId}-${row.cycleStart.getTime()}`;
+  await db.insert(platformUsage).values({ id: usageId, tenantId, cycleStart: row.cycleStart, cycleEnd: new Date(row.cycleStart.getTime() + BILLING_CYCLE_MS), tokens, requests: 1, toolCalls }).onConflictDoUpdate({ target: platformUsage.id, set: { tokens: sql`${platformUsage.tokens} + ${tokens}`, requests: sql`${platformUsage.requests} + 1`, toolCalls: sql`${platformUsage.toolCalls} + ${toolCalls}` } });
+  return { allowed: true, used: row.used, quota: row.quota, cap: row.cap, warning: row.used >= row.quota * 0.8, overageTokens: Math.max(0, row.used - row.quota) };
 }
 
 export async function listPlatformOverview(tenantId: string) {
