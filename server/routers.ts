@@ -6,6 +6,7 @@ import { systemRouter } from "./_core/systemRouter";
 import { adminProcedure, publicProcedure, router } from "./_core/trpc";
 import { addAuditLog, createTicket, getDashboardSnapshot, listKnowledgeSources, listSystems, listTickets } from "./db";
 import { addKnowledge, createAgent, createConnector, createTenant, createTenantApiKey, findTenantByApiKey, listConnectors, listPlatformOverview } from "./platform/db";
+import { runDiagnostics } from "./platform/diagnostics";
 import { executeRun, listPlatformTools } from "./platform/runtime";
 import "./platform/default-tools";
 
@@ -21,6 +22,10 @@ function fallbackAnswer(message: string) {
 
 export const appRouter = router({
   system: systemRouter,
+  diagnostics: router({
+    // public by design: the report contains statuses, latencies and error text only — never secret values
+    report: publicProcedure.query(() => runDiagnostics()),
+  }),
   auth: router({
     me: publicProcedure.query(opts => opts.ctx.user),
     logout: publicProcedure.mutation(({ ctx }) => {

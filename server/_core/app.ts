@@ -5,6 +5,7 @@ import { registerOAuthRoutes } from "./oauth";
 import { registerStorageProxy } from "./storageProxy";
 import { appRouter } from "../routers";
 import { registerPlatformHttp } from "../platform/http";
+import { runDiagnostics } from "../platform/diagnostics";
 import { createContext } from "./context";
 
 /**
@@ -20,6 +21,10 @@ export function buildApp() {
   registerStorageProxy(app);
   registerOAuthRoutes(app);
   registerPlatformHttp(app);
+  // deep health report for uptime monitors and the diagnostics dashboard
+  app.get(["/api/system/health", "/v1/system/health"], async (_req, res) => {
+    res.json(await runDiagnostics());
+  });
   // tRPC API
   app.use(
     "/api/trpc",
