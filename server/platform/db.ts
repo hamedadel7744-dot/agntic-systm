@@ -145,6 +145,41 @@ export async function listConnectors(tenantId: string) {
   return db.select().from(platformConnectors).where(eq(platformConnectors.tenantId, tenantId)).orderBy(desc(platformConnectors.createdAt));
 }
 
+/** Control-plane view: tenants with their keys (never raw values) and agent counts. */
+export async function listTenantsWithKeys() {
+  const db = await getDb();
+  if (!db) return [];
+  const [tenants, keys, agents] = await Promise.all([
+    db.select().from(platformTenants).orderBy(desc(platformTenants.createdAt)),
+    db.select().from(platformApiKeys),
+    db.select({ id: platformAgents.id, tenantId: platformAgents.tenantId }).from(platformAgents),
+  ]);
+  return tenants.map(tenant => ({
+    ...tenant,
+    agents: agents.filter(agent => agent.tenantId === tenant.id).length,
+    keys: keys.filter(key => key.tenantId === tenant.id).map(key => ({ id: key.id, label: key.label, keyPrefix: key.keyPrefix, revokedAt: key.revokedAt, lastUsedAt: key.lastUsedAt, createdAt: key.createdAt })),
+  }));
+}
+
+/** Revoke all active keys of a tenant and issue one fresh key. The raw value is
+ * returned exactly once — it is stored hashed, so losing it means rotating again. */
+export async function rotateTenantKey(tenantId: string, label = "rotated") {
+  const db = await getDb();
+  if (!db) return { tenantId, label, key: "", warning: "demo-mode" as const };
+  const tenant = (await db.select({ id: platformTenants.id }).from(platformTenants).where(eq(platformTenants.id, tenantId)).limit(1))[0];
+  if (!tenant) return { tenantId, label, key: "", notFound: true as const };
+  const now = new Date();
+  await db.update(platformApiKeys).set({ revokedAt: now }).where(and(eq(platformApiKeys.tenantId, tenantId), sql`${platformApiKeys.revokedAt} IS NULL`));
+  return await createTenantApiKey(tenantId, label);
+}
+
+export async function revokeTenantKey(tenantId: string, keyId: string) {
+  const db = await getDb();
+  if (!db) return { revoked: 0 };
+  const result = await db.update(platformApiKeys).set({ revokedAt: new Date() }).where(and(eq(platformApiKeys.id, keyId), eq(platformApiKeys.tenantId, tenantId), sql`${platformApiKeys.revokedAt} IS NULL`)).returning({ id: platformApiKeys.id });
+  return { revoked: result.length };
+}
+
 export async function resolveConversation(input: { tenantId: string; agentId: string; conversationId?: string; externalSessionId?: string }) {
   const db = await getDb();
   if (!db) return { id: input.conversationId ?? newId(), messages: [] as Array<{ role: "user" | "assistant" | "tool"; content: string }> };

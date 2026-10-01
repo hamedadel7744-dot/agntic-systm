@@ -22,7 +22,16 @@ export function registerPlatformHttp(app: Express) {
     next();
   });
   app.get("/v1/health", (_req, res) => res.json({ ok: true, service: "nova-agent-platform", version: "v1" }));
-  app.get("/v1/tools", (_req, res) => res.json({ data: listPlatformTools() }));
+  app.get("/v1/tools", async (req: Request, res: Response) => {
+    // Tool inventory is per-tenant intel: it requires a valid key and only
+    // reports enabled tools. Never anonymous.
+    if (process.env.DATABASE_URL && !(await getDb())) {
+      return res.status(503).json({ error: { code: "storage_unavailable", message: "قاعدة البيانات غير قابلة للوصول." } });
+    }
+    const resolved = await findTenantByApiKey(readApiKey(req));
+    if (!resolved) return res.status(401).json({ error: { code: "invalid_api_key", message: "API key is invalid or tenant is inactive" } });
+    return res.json({ data: listPlatformTools().filter(tool => tool.enabled), tenantId: resolved.tenant.id });
+  });
   app.post("/v1/runs", async (req: Request, res: Response) => {
     // Loud failure only when the DB is configured but unreachable — an unreachable
     // database must never masquerade as an invalid API key. In demo mode (no

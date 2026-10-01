@@ -1,4 +1,4 @@
-import { integer, pgTable, serial, text, timestamp, varchar, vector } from "drizzle-orm/pg-core";
+import { index, integer, pgTable, serial, text, timestamp, varchar, vector } from "drizzle-orm/pg-core";
 
 /** Core identity table used by Manus OAuth. */
 export const users = pgTable("users", {
@@ -128,7 +128,9 @@ export const platformApiKeys = pgTable("platformApiKeys", {
   revokedAt: timestamp("revokedAt"),
   lastUsedAt: timestamp("lastUsedAt"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
-});
+}, (table) => [
+  index("idx_platformApiKeys_tenantId").on(table.tenantId),
+]);
 
 export const platformAgents = pgTable("platformAgents", {
   id: varchar("id", { length: 36 }).primaryKey(),
@@ -148,7 +150,9 @@ export const platformAgentVersions = pgTable("platformAgentVersions", {
   config: text("config").notNull(),
   status: text("status").$type<"draft" | "validated" | "published" | "retired">().default("draft").notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
-});
+}, (table) => [
+  index("idx_platformAgentVersions_agentId").on(table.agentId),
+]);
 
 export const platformDeployments = pgTable("platformDeployments", {
   id: varchar("id", { length: 36 }).primaryKey(),
@@ -175,7 +179,9 @@ export const platformRuns = pgTable("platformRuns", {
   tokensUsed: integer("tokensUsed").default(0).notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   completedAt: timestamp("completedAt"),
-});
+}, (table) => [
+  index("idx_platformRuns_tenant_created").on(table.tenantId, table.createdAt),
+]);
 
 export const platformActions = pgTable("platformActions", {
   id: varchar("id", { length: 36 }).primaryKey(),
@@ -197,7 +203,9 @@ export const platformToolCalls = pgTable("platformToolCalls", {
   output: text("output"),
   status: text("status").$type<"pending" | "success" | "failed" | "denied">().default("pending").notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
-});
+}, (table) => [
+  index("idx_platformToolCalls_tenant_run").on(table.tenantId, table.runId),
+]);
 
 export const platformKnowledge = pgTable("platformKnowledge", {
   id: varchar("id", { length: 36 }).primaryKey(),
@@ -210,7 +218,9 @@ export const platformKnowledge = pgTable("platformKnowledge", {
   status: text("status").$type<"active" | "processing" | "needs_review">().default("active").notNull(),
   embedding: vector("embedding", { dimensions: 1536 }),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
-});
+}, (table) => [
+  index("idx_platformKnowledge_tenant_agent").on(table.tenantId, table.agentId),
+]);
 
 export const platformUsage = pgTable("platformUsage", {
   // usage ids are `${tenantId}-${cycleStartMs}` which exceeds 36 chars, so keep headroom
@@ -222,7 +232,9 @@ export const platformUsage = pgTable("platformUsage", {
   requests: integer("requests").default(0).notNull(),
   toolCalls: integer("toolCalls").default(0).notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().notNull(),
-});
+}, (table) => [
+  index("idx_platformUsage_tenantId").on(table.tenantId),
+]);
 
 export const platformEvents = pgTable("platformEvents", {
   id: varchar("id", { length: 36 }).primaryKey(),
@@ -232,7 +244,9 @@ export const platformEvents = pgTable("platformEvents", {
   payload: text("payload").notNull(),
   traceId: varchar("traceId", { length: 36 }),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
-});
+}, (table) => [
+  index("idx_platformEvents_tenant_created").on(table.tenantId, table.createdAt),
+]);
 
 export const platformConnectors = pgTable("platformConnectors", {
   id: varchar("id", { length: 36 }).primaryKey(),
@@ -255,7 +269,9 @@ export const platformConversations = pgTable("platformConversations", {
   status: text("status").$type<"active" | "closed">().default("active").notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().notNull(),
-});
+}, (table) => [
+  index("idx_platformConversations_tenantId").on(table.tenantId),
+]);
 
 export const platformMessages = pgTable("platformMessages", {
   id: varchar("id", { length: 36 }).primaryKey(),
@@ -265,4 +281,6 @@ export const platformMessages = pgTable("platformMessages", {
   content: text("content").notNull(),
   tokensUsed: integer("tokensUsed"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
-});
+}, (table) => [
+  index("idx_platformMessages_conversation").on(table.conversationId, table.tenantId),
+]);

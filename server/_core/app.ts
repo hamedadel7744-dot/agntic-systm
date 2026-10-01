@@ -5,6 +5,7 @@ import { registerOAuthRoutes } from "./oauth";
 import { registerStorageProxy } from "./storageProxy";
 import { appRouter } from "../routers";
 import { registerPlatformHttp } from "../platform/http";
+import { registerSystemAdminHttp } from "../platform/admin-http";
 import { runDiagnostics } from "../platform/diagnostics";
 import { createContext } from "./context";
 
@@ -25,6 +26,7 @@ export function buildApp() {
   registerStorageProxy(app);
   registerOAuthRoutes(app);
   registerPlatformHttp(app);
+  registerSystemAdminHttp(app);
   // deep health report for uptime monitors and the diagnostics dashboard.
   // The report itself is cached for 10s inside runDiagnostics; this limiter only
   // stops someone hammering the endpoint to exhaust pooler connections.
