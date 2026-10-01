@@ -1,6 +1,6 @@
 import type { Express, Request, Response } from "express";
 import { z } from "zod";
-import { listTenantsWithKeys, revokeTenantKey, rotateTenantKey } from "./db";
+import { addKnowledge, deleteKnowledge, listKnowledgeForAgent, listTenantsWithKeys, revokeTenantKey, rotateTenantKey } from "./db";
 import { getDb } from "../db";
 
 /**
@@ -41,5 +41,27 @@ export function registerSystemAdminHttp(app: Express) {
     const parsed = z.object({ tenantId: z.string().uuid(), keyId: z.string().uuid() }).safeParse({ tenantId: req.params.tenantId, keyId: req.body?.keyId });
     if (!parsed.success) return res.status(400).json({ error: { code: "invalid_request", details: parsed.error.flatten() } });
     return res.json({ data: await revokeTenantKey(parsed.data.tenantId, parsed.data.keyId) });
+  });
+
+  app.get("/v1/system/tenants/:tenantId/agents/:agentId/knowledge", requireAdmin, async (req: Request, res: Response) => {
+    if (!(await getDb())) return res.status(503).json({ error: { code: "storage_unavailable", message: "قاعدة البيانات غير قابلة للوصول." } });
+    const parsed = z.object({ tenantId: z.string().uuid(), agentId: z.string().uuid() }).safeParse(req.params);
+    if (!parsed.success) return res.status(400).json({ error: { code: "invalid_request", details: parsed.error.flatten() } });
+    return res.json({ data: await listKnowledgeForAgent(parsed.data.tenantId, parsed.data.agentId) });
+  });
+
+  app.post("/v1/system/tenants/:tenantId/agents/:agentId/knowledge", requireAdmin, async (req: Request, res: Response) => {
+    if (!(await getDb())) return res.status(503).json({ error: { code: "storage_unavailable", message: "قاعدة البيانات غير قابلة للوصول." } });
+    const parsed = z.object({ tenantId: z.string().uuid(), agentId: z.string().uuid(), title: z.string().min(2).max(200), content: z.string().min(10).max(200000), sourceType: z.enum(["doc", "faq", "url"]).optional() }).safeParse({ ...req.params, ...req.body });
+    if (!parsed.success) return res.status(400).json({ error: { code: "invalid_request", details: parsed.error.flatten() } });
+    const row = await addKnowledge(parsed.data);
+    return res.json({ data: { id: row.id, title: row.title, status: row.status, hasEmbedding: "embedding" in row ? Boolean(row.embedding) : false } });
+  });
+
+  app.delete("/v1/system/knowledge/:knowledgeId", requireAdmin, async (req: Request, res: Response) => {
+    if (!(await getDb())) return res.status(503).json({ error: { code: "storage_unavailable", message: "قاعدة البيانات غير قابلة للوصول." } });
+    const parsed = z.object({ knowledgeId: z.string().uuid(), tenantId: z.string().uuid() }).safeParse({ knowledgeId: req.params.knowledgeId, tenantId: req.query.tenantId });
+    if (!parsed.success) return res.status(400).json({ error: { code: "invalid_request", details: parsed.error.flatten() } });
+    return res.json({ data: await deleteKnowledge(parsed.data.tenantId, parsed.data.knowledgeId) });
   });
 }

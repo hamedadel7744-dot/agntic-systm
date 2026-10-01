@@ -1,0 +1,32 @@
+name: Health Watch
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check production health
+        run: |
+          BODY=$(curl -sf https://agntic-systm.vercel.app/api/system/health) || { echo "::error::Health endpoint unreachable"; exit 1; }
+          echo "$BODY" | node -e "
+            let d = '';
+            process.stdin.on('data', c => d += c);
+            process.stdin.on('end', () => {
+              let r;
+              try { r = JSON.parse(d); } catch { console.log('::error::Health endpoint returned non-JSON'); process.exit(1); }
+              const groups = ['database', 'schema', 'tools'];
+              const infraFail = (r.checks ?? []).some(c => groups.includes(c.group) && c.status === 'fail');
+              if (infraFail) {
+                const ids = (r.checks ?? []).filter(c => c.status === 'fail' && groups.includes(c.group)).map(c => c.id);
+                console.log('::error::Infrastructure failing: ' + ids.join(', ') + ' — open /api/system/health for causes and fixes');
+                process.exit(1);
+              }
+              if (r.status !== 'ok') {
+                console.log('::warning::Degraded at config level (env/llm) — overall ' + r.status + '. Not paging.');
+              }
+            });
+          "

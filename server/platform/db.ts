@@ -2,6 +2,14 @@ import { and, desc, eq, sql } from "drizzle-orm";
 import { getDb } from "../db";
 import { platformAgents, platformAgentVersions, platformApiKeys, platformConnectors, platformConversations, platformDeployments, platformEvents, platformKnowledge, platformMessages, platformRuns, platformTenants, platformToolCalls, platformUsage } from "../../drizzle/schema";
 import { hashApiKey, newId, safeJson } from "./identity";
+import { embedText, toVectorLiteral } from "./embeddings";
+
+/** Normalizes drizzle execute() results across pg drivers into plain row arrays. */
+function rawRows(result: unknown): Record<string, unknown>[] {
+  if (Array.isArray(result)) return result as Record<string, unknown>[];
+  const rows = (result as { rows?: unknown })?.rows;
+  return Array.isArray(rows) ? (rows as Record<string, unknown>[]) : [];
+}
 
 export async function createTenant(input: { name: string; plan?: "basic" | "pro" | "enterprise"; tokenQuota?: number; hardCap?: number }) {
   const db = await getDb();
@@ -109,13 +117,36 @@ export async function addKnowledge(input: { tenantId: string; agentId: string; t
   const db = await getDb();
   const id = newId();
   if (!db) return { id, ...input, status: "active" as const };
-  await db.insert(platformKnowledge).values({ id, tenantId: input.tenantId, agentId: input.agentId, title: input.title, content: input.content, contentHash: hashApiKey(input.content), sourceType: input.sourceType ?? "doc" });
+  // Embedding is best-effort: without a provider key the row is still stored and
+  // searchable via the keyword path.
+  const embedding = await embedText(`${input.title}\n${input.content}`);
+  await db.insert(platformKnowledge).values({ id, tenantId: input.tenantId, agentId: input.agentId, title: input.title, content: input.content, contentHash: hashApiKey(input.content), sourceType: input.sourceType ?? "doc", ...(embedding ? { embedding } : {}) });
   return (await db.select().from(platformKnowledge).where(and(eq(platformKnowledge.id, id), eq(platformKnowledge.tenantId, input.tenantId))).limit(1))[0];
+}
+
+export async function listKnowledgeForAgent(tenantId: string, agentId: string) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select({ id: platformKnowledge.id, title: platformKnowledge.title, sourceType: platformKnowledge.sourceType, status: platformKnowledge.status, hasEmbedding: sql<boolean>`${platformKnowledge.embedding} is not null`, createdAt: platformKnowledge.createdAt }).from(platformKnowledge).where(and(eq(platformKnowledge.tenantId, tenantId), eq(platformKnowledge.agentId, agentId))).orderBy(desc(platformKnowledge.createdAt));
+}
+
+export async function deleteKnowledge(tenantId: string, knowledgeId: string) {
+  const db = await getDb();
+  if (!db) return { deleted: 0 };
+  const rows = await db.delete(platformKnowledge).where(and(eq(platformKnowledge.id, knowledgeId), eq(platformKnowledge.tenantId, tenantId))).returning({ id: platformKnowledge.id });
+  return { deleted: rows.length };
 }
 
 export async function searchKnowledge(tenantId: string, agentId: string, query: string) {
   const db = await getDb();
   if (!db) return [];
+  // Semantic path first (pgvector cosine distance); silently degrades to keyword
+  // matching when embeddings are unavailable (no key yet, or no embedded docs).
+  const queryEmbedding = await embedText(query);
+  if (queryEmbedding) {
+    const vectorRows = rawRows(await db.execute(sql`select "id", "title", "content", "sourceType", "status", "createdAt" from "platformKnowledge" where "tenantId" = ${tenantId} and "agentId" = ${agentId} and "status" = 'active' and "embedding" is not null order by "embedding" <=> ${toVectorLiteral(queryEmbedding)}::vector limit 5`));
+    if (vectorRows.length > 0) return vectorRows as Array<{ id: string; title: string; content: string; sourceType: string; status: string; createdAt: Date }>;
+  }
   const rows = await db.select().from(platformKnowledge).where(and(eq(platformKnowledge.tenantId, tenantId), eq(platformKnowledge.agentId, agentId), eq(platformKnowledge.status, "active"))).limit(50);
   const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
   return rows.map(row => ({ row, score: terms.filter(term => `${row.title} ${row.content}`.toLowerCase().includes(term)).length })).filter(item => item.score > 0).sort((a, b) => b.score - a.score).slice(0, 5).map(item => item.row);
@@ -152,11 +183,11 @@ export async function listTenantsWithKeys() {
   const [tenants, keys, agents] = await Promise.all([
     db.select().from(platformTenants).orderBy(desc(platformTenants.createdAt)),
     db.select().from(platformApiKeys),
-    db.select({ id: platformAgents.id, tenantId: platformAgents.tenantId }).from(platformAgents),
+    db.select({ id: platformAgents.id, tenantId: platformAgents.tenantId, name: platformAgents.name }).from(platformAgents),
   ]);
   return tenants.map(tenant => ({
     ...tenant,
-    agents: agents.filter(agent => agent.tenantId === tenant.id).length,
+    agents: agents.filter(agent => agent.tenantId === tenant.id).map(agent => ({ id: agent.id, name: agent.name })),
     keys: keys.filter(key => key.tenantId === tenant.id).map(key => ({ id: key.id, label: key.label, keyPrefix: key.keyPrefix, revokedAt: key.revokedAt, lastUsedAt: key.lastUsedAt, createdAt: key.createdAt })),
   }));
 }
