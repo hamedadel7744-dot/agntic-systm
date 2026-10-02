@@ -14,7 +14,16 @@ function redactContext(value: string) {
 export async function executeRun(request: RunRequest): Promise<RuntimeOutcome> {
   const traceId = newId();
   const agent = await getAgentScoped(request.tenantId, request.agentId);
-  if (!agent?.agent || !agent.version) return { runId: "", traceId, status: "failed", answer: "الوكيل غير موجود داخل هذا الـ tenant.", tokensUsed: 0, toolCalls: 0 };
+  // Distinct denials with distinct causes — "not found" and "exists without a
+  // published version" need different fixes, and both are audited.
+  if (!agent?.agent) {
+    await recordEvent({ tenantId: request.tenantId, type: "run.rejected", payload: { reason: "agent_not_found", agentId: request.agentId }, traceId });
+    return { runId: "", traceId, status: "failed", answer: "الوكيل غير موجود داخل هذا الـ tenant.", tokensUsed: 0, toolCalls: 0 };
+  }
+  if (!agent.version) {
+    await recordEvent({ tenantId: request.tenantId, type: "run.rejected", payload: { reason: "agent_without_version", agentId: request.agentId }, traceId });
+    return { runId: "", traceId, status: "failed", answer: "الوكيل موجود لكن بلا نسخة system prompt — أنشئ نسخة أولًا من لوحة التحكم.", tokensUsed: 0, toolCalls: 0 };
+  }
 
   const conversation = await resolveConversation({ tenantId: request.tenantId, agentId: request.agentId, conversationId: request.conversationId, externalSessionId: request.externalSessionId });
   const run = await createRun({ tenantId: request.tenantId, agentId: request.agentId, input: request.input, traceId, conversationId: conversation.id });
