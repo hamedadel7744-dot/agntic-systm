@@ -5,9 +5,7 @@ import type { PlatformTool, RunRequest, RuntimeOutcome, ToolExecutionContext } f
 
 const toolRegistry = new Map<string, PlatformTool>();
 export function registerPlatformTool(tool: PlatformTool) { toolRegistry.set(tool.describe().name, tool); }
-export function listPlatformTools() { return Array.from(toolRegistry.values()).map(tool => describeToolSafe(tool)); }
-
-function describeToolSafe(tool: PlatformTool) { return tool.describe(); }
+export function listPlatformTools() { return Array.from(toolRegistry.values()).map(tool => tool.describe()); }
 
 /** The three pillars an agent stands on: knowledge (per agent), model (per version), tool policy (per version). */
 export type ToolPolicy = "read" | "execute" | "both";

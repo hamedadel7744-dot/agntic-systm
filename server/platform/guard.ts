@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull, lt, sql } from "drizzle-orm";
+import { and, eq, isNull, lt, sql } from "drizzle-orm";
 import { getDb } from "../db";
 import { recordEvent } from "./db";
 import { platformAgents, platformAgentVersions, platformApiKeys, platformKnowledge, platformRuns, platformTenants } from "../../drizzle/schema";
@@ -60,7 +60,9 @@ export async function runGuardSweep(): Promise<GuardReport> {
     return { ranAt, reapedZombies: 0, findings: [{ id: "db_unavailable", severity: "fail", title: "قاعدة البيانات غير متاحة", detail: "المسح اتوقف — مفيش حاجة اتعامت.", fix: "افحص /api/system/health لمعرفة سبب انقطاع القاعدة." }] };
   }
   const staleCutoff = new Date(Date.now() - 15 * 60 * 1000);
-  const zombies = await db.select({ id: platformRuns.id, tenantId: platformRuns.tenantId }).from(platformRuns).where(and(inArray(platformRuns.status, ["running", "waiting_approval"]), lt(platformRuns.createdAt, staleCutoff)));
+  // Only "running" can be a zombie. "waiting_approval" is a legitimate paused
+  // state — a human approval may take hours; reaping it would kill real flows.
+  const zombies = await db.select({ id: platformRuns.id, tenantId: platformRuns.tenantId }).from(platformRuns).where(and(eq(platformRuns.status, "running"), lt(platformRuns.createdAt, staleCutoff)));
   let reaped = 0;
   for (const zombie of zombies) {
     await db.update(platformRuns).set({ status: "failed", error: "zombie_reaped_by_guard", completedAt: new Date() }).where(eq(platformRuns.id, zombie.id));

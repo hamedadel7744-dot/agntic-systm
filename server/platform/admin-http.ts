@@ -1,9 +1,17 @@
 import type { Express, Request, Response } from "express";
 import { z } from "zod";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { addKnowledge, createAgentVersion, deleteKnowledge, listAgentVersions, listKnowledgeForAgent, listRecentRuns, listTenantsWithKeys, revokeTenantKey, rotateTenantKey, setTenantStatus } from "./db";
 import { parseAgentConfig } from "./runtime";
 import { runGuardSweep } from "./guard";
 import { getDb } from "../db";
+
+/** Constant-time comparison: hash both sides first so length differences never leak. */
+function tokenMatches(provided: string, expected: string): boolean {
+  const a = createHash("sha256").update(provided).digest();
+  const b = createHash("sha256").update(expected).digest();
+  return timingSafeEqual(a, b);
+}
 
 /**
  * Control-plane REST surface, guarded by a single shared admin token from env.
@@ -16,7 +24,7 @@ function requireAdmin(req: Request, res: Response, next: () => void) {
   if (!token) {
     return res.status(503).json({ error: { code: "admin_disabled", message: "PLATFORM_ADMIN_TOKEN غير مضبوط؛ إدارة المنصة معطلة عمدًا حتى يُضبط المتغير." } });
   }
-  if (req.header("x-admin-token") !== token) {
+  if (!tokenMatches(req.header("x-admin-token") ?? "", token)) {
     return res.status(401).json({ error: { code: "invalid_admin_token", message: "توكن المدير غير صحيح." } });
   }
   next();

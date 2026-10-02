@@ -53,7 +53,12 @@ export const appRouter = router({
         const response = await invokeLLM({ messages: [{ role: "system", content: `أنت وكيل دعم ذكي. أجب بالعربية المصرية الواضحة وباختصار عملي. النظام الحالي رقم ${input.systemId ?? "غير محدد"}. الصفحة الحالية: ${input.currentPage ?? "غير محددة"}. لا تخترع بيانات.` }, ...history, { role: "user", content: input.message }] });
         const content = response.choices?.[0]?.message?.content;
         return { answer: typeof content === "string" ? content : fallbackAnswer(input.message), confidence: 86 };
-      } catch { return { answer: fallbackAnswer(input.message), confidence: 62 }; }
+      } catch (error) {
+        // Even the demo fallback must be honest about why it fired.
+        const reason = error instanceof Error ? error.message : "llm_unavailable";
+        console.warn("[ai.chat] LLM unavailable, degraded fallback:", reason);
+        return { answer: `${fallbackAnswer(input.message)}\n\n(إجابة احتياطية: النموذج اللغوي غير متاح حاليًا — ${reason.slice(0, 140)})`, confidence: 62 };
+      }
     }),
   }),
   platform: router({

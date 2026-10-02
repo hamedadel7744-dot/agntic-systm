@@ -195,15 +195,15 @@ async function collectIncidents(dbAvailable: boolean): Promise<DiagnosticsReport
     db.select({ id: platformRuns.id, error: platformRuns.error, createdAt: platformRuns.createdAt }).from(platformRuns).where(eq(platformRuns.status, "failed")).orderBy(desc(platformRuns.createdAt)).limit(10),
     db.select({ count: sql<number>`count(*)::int` }).from(platformRuns).where(and(eq(platformRuns.status, "failed"), sql`${platformRuns.createdAt} > ${since}`)),
     db.select({ id: platformEvents.id, error: platformEvents.eventType, createdAt: platformEvents.createdAt }).from(platformEvents).where(inArray(platformEvents.eventType, ["usage.warning_80", "usage.overage"])).orderBy(desc(platformEvents.createdAt)).limit(5),
-    // Runs stuck in running/waiting_approval are zombies: the process was killed
-    // mid-run (timeout/OOM) and no catch block ever got to mark them failed.
-    db.select({ id: platformRuns.id, error: platformRuns.error, createdAt: platformRuns.createdAt }).from(platformRuns).where(and(inArray(platformRuns.status, ["running", "waiting_approval"]), sql`${platformRuns.createdAt} < ${staleCutoff}`)).orderBy(desc(platformRuns.createdAt)).limit(10),
+    // Only "running" past the window is a zombie; waiting_approval is a legitimate
+    // paused state (human approval may take hours) and is never flagged here.
+    db.select({ id: platformRuns.id, error: platformRuns.error, createdAt: platformRuns.createdAt }).from(platformRuns).where(and(eq(platformRuns.status, "running"), sql`${platformRuns.createdAt} < ${staleCutoff}`)).orderBy(desc(platformRuns.createdAt)).limit(10),
   ]);
   return {
     failedRuns: failed.map(row => ({ id: row.id, error: row.error ?? "بدون رسالة خطأ", createdAt: row.createdAt.toISOString() })),
     failedRuns24h: failedCount[0]?.count ?? 0,
     usageWarnings: warnings.map(row => ({ id: row.id, error: row.error, createdAt: row.createdAt.toISOString() })),
-    staleRuns: stale.map(row => ({ id: row.id, error: row.error ?? "الحالة الحالية: running/waiting_approval منذ أكثر من 15 دقيقة", createdAt: row.createdAt.toISOString() })),
+    staleRuns: stale.map(row => ({ id: row.id, error: row.error ?? "الحالة الحالية: running منذ أكثر من 15 دقيقة", createdAt: row.createdAt.toISOString() })),
   };
 }
 
