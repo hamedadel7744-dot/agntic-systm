@@ -41,6 +41,8 @@ function VersionsAdmin() {
   const [versions, setVersions] = useState<VersionRow[]>([]);
   const [versionLabel, setVersionLabel] = useState("");
   const [prompt, setPrompt] = useState("");
+  const [modelText, setModelText] = useState("");
+  const [toolPolicy, setToolPolicy] = useState<"read" | "execute" | "both">("both");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -96,12 +98,14 @@ function VersionsAdmin() {
     setError("");
     setNotice("");
     try {
-      const res = await fetch(`/v1/system/tenants/${tenantId}/agents/${agentId}/versions`, { method: "POST", headers: { "Content-Type": "application/json", "x-admin-token": token }, body: JSON.stringify({ version: versionLabel.trim(), systemPrompt: prompt }) });
+      const res = await fetch(`/v1/system/tenants/${tenantId}/agents/${agentId}/versions`, { method: "POST", headers: { "Content-Type": "application/json", "x-admin-token": token }, body: JSON.stringify({ version: versionLabel.trim(), systemPrompt: prompt, ...(modelText.trim() ? { model: modelText.trim() } : {}), toolPolicy }) });
       const body = await res.json();
       if (!res.ok) throw new Error(body?.error?.message ?? "فشل نشر النسخة");
-      setNotice(`تم نشر النسخة ${body.data?.version} — وهي النشطة الآن (آخر نسخة تفوز).`);
+      setNotice(`تم نشر النسخة ${body.data?.version} (نموذج: ${body.data?.model} — ${TOOL_POLICY_LABELS[body.data?.toolPolicy] ?? body.data?.toolPolicy}) — وهي النشطة الآن (آخر نسخة تفوز).`);
       setVersionLabel("");
       setPrompt("");
+      setModelText("");
+      setToolPolicy("both");
       await loadVersions(tenantId, agentId);
     } catch (e) {
       setError((e as Error).message);
@@ -163,25 +167,40 @@ function VersionsAdmin() {
           <>
             <div className="space-y-2">
               {versions.length === 0 && <p className="text-xs text-[#98a4b5]">لا نسخ لهذا الوكيل بعد.</p>}
-              {versions.map((item, index) => (
+              {versions.map((item, index) => {
+                const meta = versionMeta(item.config);
+                return (
                 <div key={item.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-[#f7f8fb] px-3 py-2">
                   <div className="flex flex-wrap items-center gap-2 text-[10px] font-bold text-[#526079]">
                     <code dir="ltr" className="text-xs">{item.version}</code>
                     {index === 0 ? <Badge className="border-0 bg-[#f4fcf8] text-[9px] text-[#198a6a]">النشطة</Badge> : <Badge className="border-0 bg-white text-[9px] text-[#98a4b5]">سابقة</Badge>}
-                    <span className="max-w-[320px] truncate" title={item.systemPrompt}>{item.systemPrompt.slice(0, 80)}</span>
+                    <Badge className="border-0 bg-white text-[9px] text-[#6376df]">{meta.model ?? "نموذج افتراضي"}</Badge>
+                    <Badge className="border-0 bg-white text-[9px] text-[#198a6a]">{TOOL_POLICY_LABELS[meta.toolPolicy] ?? meta.toolPolicy}</Badge>
+                    <span className="max-w-[240px] truncate" title={item.systemPrompt}>{item.systemPrompt.slice(0, 60)}</span>
                     <span className="text-[#98a4b5]">{new Date(item.createdAt).toLocaleString("ar-EG")}</span>
                   </div>
                   {index !== 0 && <Button onClick={() => rollback(item.id, item.version)} disabled={busy} className="h-7 rounded-lg bg-[#fff7ee] px-3 text-[10px] font-bold text-[#b06f1f] hover:bg-[#fdeed8]"><RotateCcw className="ml-1 h-3 w-3" />تراجع لهذه</Button>}
                 </div>
-              ))}
+                );
+              })}
             </div>
             <div className="my-2 h-px bg-[#eef1f5]" />
             <div className="space-y-3">
-              <div className="grid gap-3 md:grid-cols-[220px_1fr]">
+              <div className="grid gap-3 md:grid-cols-[160px_1fr_180px]">
                 <div><label className="mb-2 block text-xs font-bold">رقم النسخة</label><Input value={versionLabel} onChange={e => setVersionLabel(e.target.value)} placeholder="1.1.0" className="h-11 rounded-xl text-xs" dir="ltr" /></div>
                 <div><label className="mb-2 block text-xs font-bold">System Prompt الجديد</label><textarea value={prompt} onChange={e => setPrompt(e.target.value)} className="min-h-20 w-full rounded-xl border border-[#dfe6ee] bg-white p-3 text-xs leading-6 outline-none focus:border-[#35c29a]" /></div>
+                <div className="space-y-3">
+                  <div><label className="mb-2 block text-xs font-bold">النموذج</label><Input value={modelText} onChange={e => setModelText(e.target.value)} placeholder="افتراضي المنصة" className="h-11 rounded-xl text-xs" dir="ltr" /></div>
+                  <div><label className="mb-2 block text-xs font-bold">سياسة الأدوات</label>
+                    <select value={toolPolicy} onChange={e => setToolPolicy(e.target.value as "read" | "execute" | "both")} className="h-11 w-full rounded-xl border border-[#dfe6ee] bg-white px-3 text-xs font-bold outline-none focus:border-[#35c29a]">
+                      <option value="both">قراءة وتنفيذ</option>
+                      <option value="read">قراءة فقط</option>
+                      <option value="execute">تنفيذ فقط</option>
+                    </select>
+                  </div>
+                </div>
               </div>
-              <p className="text-[10px] leading-5 text-[#98a4b5]">آخر نسخة هي النشطة تلقائيًا في الـ runtime. التراجع بينسخ محتوى نسخة قديمة كنسخة جديدة — التاريخ عمره ما بيتكتب فوقه.</p>
+              <p className="text-[10px] leading-5 text-[#98a4b5]">آخر نسخة هي النشطة تلقائيًا في الـ runtime. النسخة بتحمل العقد كامل: الـ prompt والنموذج وسياسة الأدوات. التراجع بينسخ العقد كامل كنسخة جديدة — التاريخ عمره ما بيتكتب فوقه.</p>
               <Button onClick={publish} disabled={busy || versionLabel.trim().length < 1 || prompt.trim().length < 10} className="h-11 w-full rounded-xl bg-[#198a6a] text-xs font-bold text-white hover:bg-[#147758]"><Plus className="ml-2 h-4 w-4" />{busy ? "جارٍ النشر..." : "نشر نسخة جديدة"}</Button>
             </div>
           </>
@@ -351,7 +370,18 @@ type TenantKeyRow = { id: string; label: string; keyPrefix: string; revokedAt: s
 type TenantRow = { id: string; name: string; plan: string; status: string; tokenQuota: number; tokenUsedThisCycle: number; agents: Array<{ id: string; name: string }>; keys: TenantKeyRow[] };
 type KnowledgeRow = { id: string; title: string; sourceType: string; status: string; hasEmbedding: boolean; createdAt: string };
 type RunRow = { id: string; status: string; error: string | null; input: string; tokensUsed: number; traceId: string; createdAt: string };
-type VersionRow = { id: string; version: string; systemPrompt: string; status: string; createdAt: string };
+type VersionRow = { id: string; version: string; systemPrompt: string; config: string; status: string; createdAt: string };
+
+function versionMeta(config: string): { model?: string; toolPolicy: string } {
+  try {
+    const parsed = JSON.parse(config || "{}") as { model?: unknown; toolPolicy?: unknown };
+    return { model: typeof parsed.model === "string" && parsed.model ? parsed.model : undefined, toolPolicy: parsed.toolPolicy === "read" || parsed.toolPolicy === "execute" ? parsed.toolPolicy : "both" };
+  } catch {
+    return { toolPolicy: "both" };
+  }
+}
+
+const TOOL_POLICY_LABELS: Record<string, string> = { read: "أدوات: قراءة فقط", execute: "أدوات: تنفيذ فقط", both: "أدوات: قراءة وتنفيذ" };
 
 function TenantsAdmin() {
   const [token, setToken] = useState(() => localStorage.getItem("platformAdminToken") ?? "");

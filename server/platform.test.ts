@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { appRouter } from "./routers";
 import { createApiKey, hashApiKey } from "./platform/identity";
-import { listPlatformTools } from "./platform/runtime";
+import { listPlatformTools, parseAgentConfig, toolMatchesPolicy } from "./platform/runtime";
 import { checkRateLimit } from "./platform/rate-limit";
 import type { TrpcContext } from "./_core/context";
 
@@ -47,5 +47,24 @@ describe("platform security contracts", () => {
     expect(checkRateLimit(buckets, "tenant-b", 3, now).allowed).toBe(true);
     now += 61_000;
     expect(attempt().allowed).toBe(true);
+  });
+
+  it("parses agent version config with safe defaults", () => {
+    expect(parseAgentConfig("{}")).toEqual({ toolPolicy: "both" });
+    expect(parseAgentConfig('{"model":"gpt-4o-mini","toolPolicy":"read"}')).toEqual({ model: "gpt-4o-mini", toolPolicy: "read" });
+    expect(parseAgentConfig("not-json")).toEqual({ toolPolicy: "both" });
+    expect(parseAgentConfig('{"model":"   "}').model).toBeUndefined();
+    expect(parseAgentConfig('{"toolPolicy":"nonsense"}').toolPolicy).toBe("both");
+  });
+
+  it("maps tool policy onto tool risk classes", () => {
+    expect(toolMatchesPolicy("read", "read")).toBe(true);
+    expect(toolMatchesPolicy("safe_action", "read")).toBe(false);
+    expect(toolMatchesPolicy("sensitive", "read")).toBe(false);
+    expect(toolMatchesPolicy("safe_action", "execute")).toBe(true);
+    expect(toolMatchesPolicy("sensitive", "execute")).toBe(true);
+    expect(toolMatchesPolicy("read", "execute")).toBe(false);
+    expect(toolMatchesPolicy("read", "both")).toBe(true);
+    expect(toolMatchesPolicy("sensitive", "both")).toBe(true);
   });
 });

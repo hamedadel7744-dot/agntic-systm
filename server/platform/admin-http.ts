@@ -1,6 +1,7 @@
 import type { Express, Request, Response } from "express";
 import { z } from "zod";
 import { addKnowledge, createAgentVersion, deleteKnowledge, listAgentVersions, listKnowledgeForAgent, listRecentRuns, listTenantsWithKeys, revokeTenantKey, rotateTenantKey, setTenantStatus } from "./db";
+import { parseAgentConfig } from "./runtime";
 import { getDb } from "../db";
 
 /**
@@ -90,11 +91,14 @@ export function registerSystemAdminHttp(app: Express) {
 
   app.post("/v1/system/tenants/:tenantId/agents/:agentId/versions", requireAdmin, async (req: Request, res: Response) => {
     if (!(await getDb())) return res.status(503).json({ error: { code: "storage_unavailable", message: "قاعدة البيانات غير قابلة للوصول." } });
-    const parsed = z.object({ tenantId: z.string().uuid(), agentId: z.string().uuid(), version: z.string().min(1).max(32), systemPrompt: z.string().min(10).max(20000) }).safeParse({ ...req.params, ...req.body });
+    const parsed = z.object({ tenantId: z.string().uuid(), agentId: z.string().uuid(), version: z.string().min(1).max(32), systemPrompt: z.string().min(10).max(20000), model: z.string().trim().max(100).optional(), toolPolicy: z.enum(["read", "execute", "both"]).optional() }).safeParse({ ...req.params, ...req.body });
     if (!parsed.success) return res.status(400).json({ error: { code: "invalid_request", details: parsed.error.flatten() } });
-    const result = await createAgentVersion(parsed.data);
+    // The version carries the agent's full contract: prompt + model + tool policy.
+    const config = JSON.stringify({ ...(parsed.data.model ? { model: parsed.data.model } : {}), toolPolicy: parsed.data.toolPolicy ?? "both" });
+    const result = await createAgentVersion({ tenantId: parsed.data.tenantId, agentId: parsed.data.agentId, version: parsed.data.version, systemPrompt: parsed.data.systemPrompt, config });
     if ("notFound" in result) return res.status(404).json({ error: { code: "agent_not_found", message: "Agent غير موجود داخل هذا الـ tenant." } });
-    return res.json({ data: { id: result.id, version: result.version, status: result.status } });
+    const effective = parseAgentConfig(result.config ?? "{}");
+    return res.json({ data: { id: result.id, version: result.version, status: result.status, model: effective.model ?? "platform-default", toolPolicy: effective.toolPolicy } });
   });
 
   app.post("/v1/system/tenants/:tenantId/agents/:agentId/rollback", requireAdmin, async (req: Request, res: Response) => {
@@ -103,8 +107,10 @@ export function registerSystemAdminHttp(app: Express) {
     if (!parsed.success) return res.status(400).json({ error: { code: "invalid_request", details: parsed.error.flatten() } });
     const target = (await listAgentVersions(parsed.data.tenantId, parsed.data.agentId)).find(item => item.id === parsed.data.toVersionId);
     if (!target) return res.status(404).json({ error: { code: "version_not_found", message: "النسخة المطلوبة غير موجودة لهذا الوكيل." } });
-    const result = await createAgentVersion({ tenantId: parsed.data.tenantId, agentId: parsed.data.agentId, version: `rb-${Date.now()}`, systemPrompt: target.systemPrompt });
+    // Rollback restores the version's whole contract: prompt + model + tool policy.
+    const result = await createAgentVersion({ tenantId: parsed.data.tenantId, agentId: parsed.data.agentId, version: `rb-${Date.now()}`, systemPrompt: target.systemPrompt, config: target.config });
     if ("notFound" in result) return res.status(404).json({ error: { code: "agent_not_found", message: "Agent غير موجود داخل هذا الـ tenant." } });
-    return res.json({ data: { id: result.id, version: result.version, restoredFrom: target.version, status: result.status } });
+    const effective = parseAgentConfig(result.config ?? "{}");
+    return res.json({ data: { id: result.id, version: result.version, restoredFrom: target.version, status: result.status, model: effective.model ?? "platform-default", toolPolicy: effective.toolPolicy } });
   });
 }

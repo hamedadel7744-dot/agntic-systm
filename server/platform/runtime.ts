@@ -5,7 +5,30 @@ import type { PlatformTool, RunRequest, RuntimeOutcome, ToolExecutionContext } f
 
 const toolRegistry = new Map<string, PlatformTool>();
 export function registerPlatformTool(tool: PlatformTool) { toolRegistry.set(tool.describe().name, tool); }
-export function listPlatformTools() { return Array.from(toolRegistry.values()).map(tool => tool.describe()); }
+export function listPlatformTools() { return Array.from(toolRegistry.values()).map(tool => describeToolSafe(tool)); }
+
+function describeToolSafe(tool: PlatformTool) { return tool.describe(); }
+
+/** The three pillars an agent stands on: knowledge (per agent), model (per version), tool policy (per version). */
+export type ToolPolicy = "read" | "execute" | "both";
+
+export function parseAgentConfig(configText: string): { model?: string; toolPolicy: ToolPolicy } {
+  try {
+    const parsed = JSON.parse(configText || "{}") as { model?: unknown; toolPolicy?: unknown };
+    const model = typeof parsed.model === "string" && parsed.model.trim().length > 0 ? parsed.model.trim().slice(0, 100) : undefined;
+    const toolPolicy: ToolPolicy = parsed.toolPolicy === "read" || parsed.toolPolicy === "execute" ? parsed.toolPolicy : "both";
+    return { model, toolPolicy };
+  } catch {
+    return { toolPolicy: "both" };
+  }
+}
+
+/** read → only read-risk tools; execute → only action tools; both → everything. */
+export function toolMatchesPolicy(risk: "read" | "safe_action" | "sensitive", policy: ToolPolicy): boolean {
+  if (policy === "read") return risk === "read";
+  if (policy === "execute") return risk !== "read";
+  return true;
+}
 
 function redactContext(value: string) {
   return value.replace(/(?:sk|pk|api|token|secret)[_-]?[a-z0-9-]{12,}/gi, "[REDACTED]");
@@ -24,6 +47,7 @@ export async function executeRun(request: RunRequest): Promise<RuntimeOutcome> {
     await recordEvent({ tenantId: request.tenantId, type: "run.rejected", payload: { reason: "agent_without_version", agentId: request.agentId }, traceId });
     return { runId: "", traceId, status: "failed", answer: "الوكيل موجود لكن بلا نسخة system prompt — أنشئ نسخة أولًا من لوحة التحكم.", tokensUsed: 0, toolCalls: 0 };
   }
+  const agentConfig = parseAgentConfig(agent.version.config);
 
   const conversation = await resolveConversation({ tenantId: request.tenantId, agentId: request.agentId, conversationId: request.conversationId, externalSessionId: request.externalSessionId });
   const run = await createRun({ tenantId: request.tenantId, agentId: request.agentId, input: request.input, traceId, conversationId: conversation.id });
@@ -35,8 +59,11 @@ export async function executeRun(request: RunRequest): Promise<RuntimeOutcome> {
   try {
     const evidence = await searchKnowledge(request.tenantId, request.agentId, request.input);
     const evidenceText = evidence.map(item => `مصدر: ${item.title}\n${item.content.slice(0, 1200)}`).join("\n\n");
-    const tools = listPlatformTools().filter(tool => tool.enabled).map(tool => ({ type: "function" as const, function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } }));
+    const allowedTools = listPlatformTools().filter(tool => tool.enabled && toolMatchesPolicy(tool.risk, agentConfig.toolPolicy));
+    const tools = allowedTools.map(tool => ({ type: "function" as const, function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } }));
+    await recordEvent({ tenantId: request.tenantId, runId, type: "run.config", payload: { model: agentConfig.model ?? "platform-default", toolPolicy: agentConfig.toolPolicy, toolsOffered: allowedTools.map(tool => tool.name) }, traceId });
     const response = await invokeLLM({
+      model: agentConfig.model,
       messages: [
         { role: "system", content: `${redactContext(agent.version.systemPrompt)}\n\nقواعد المنصة: لا تكشف أسرارًا، لا تنفذ side effect خارج أدوات معتمدة، وإذا احتاجت الأداة موافقة أبلغ المستخدم بذلك.\n\nالمعرفة المتاحة:\n${evidenceText || "لا توجد مصادر مطابقة."}` },
         ...conversation.messages.map(item => ({ role: item.role, content: item.content })),
@@ -62,6 +89,11 @@ export async function executeRun(request: RunRequest): Promise<RuntimeOutcome> {
       let input: Record<string, unknown> = {};
       try { input = JSON.parse(call.function?.arguments ?? "{}"); } catch { input = {}; }
       if (!tool) { await recordToolCall({ tenantId: request.tenantId, runId, toolName, toolInput: input, status: "denied", output: { reason: "tool_not_registered" } }); continue; }
+      if (!toolMatchesPolicy(tool.describe().risk, agentConfig.toolPolicy)) {
+        // The model tried a tool outside this version's policy — hard denial, audited.
+        await recordToolCall({ tenantId: request.tenantId, runId, toolName, toolInput: input, status: "denied", output: { reason: "tool_policy_denied", policy: agentConfig.toolPolicy } });
+        continue;
+      }
       const definition = tool.describe();
       const toolContext: ToolExecutionContext = { tenantId: request.tenantId, runId, traceId, deadline: Date.now() + 15000, source: "internal" };
       const authorization = await tool.authorize(toolContext);
