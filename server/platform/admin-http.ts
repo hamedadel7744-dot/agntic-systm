@@ -1,6 +1,6 @@
 import type { Express, Request, Response } from "express";
 import { z } from "zod";
-import { addKnowledge, deleteKnowledge, listKnowledgeForAgent, listRecentRuns, listTenantsWithKeys, revokeTenantKey, rotateTenantKey, setTenantStatus } from "./db";
+import { addKnowledge, createAgentVersion, deleteKnowledge, listAgentVersions, listKnowledgeForAgent, listRecentRuns, listTenantsWithKeys, revokeTenantKey, rotateTenantKey, setTenantStatus } from "./db";
 import { getDb } from "../db";
 
 /**
@@ -79,5 +79,32 @@ export function registerSystemAdminHttp(app: Express) {
     const parsed = z.object({ tenantId: z.string().uuid() }).safeParse(req.params);
     if (!parsed.success) return res.status(400).json({ error: { code: "invalid_request", details: parsed.error.flatten() } });
     return res.json({ data: await listRecentRuns(parsed.data.tenantId) });
+  });
+
+  app.get("/v1/system/tenants/:tenantId/agents/:agentId/versions", requireAdmin, async (req: Request, res: Response) => {
+    if (!(await getDb())) return res.status(503).json({ error: { code: "storage_unavailable", message: "قاعدة البيانات غير قابلة للوصول." } });
+    const parsed = z.object({ tenantId: z.string().uuid(), agentId: z.string().uuid() }).safeParse(req.params);
+    if (!parsed.success) return res.status(400).json({ error: { code: "invalid_request", details: parsed.error.flatten() } });
+    return res.json({ data: await listAgentVersions(parsed.data.tenantId, parsed.data.agentId) });
+  });
+
+  app.post("/v1/system/tenants/:tenantId/agents/:agentId/versions", requireAdmin, async (req: Request, res: Response) => {
+    if (!(await getDb())) return res.status(503).json({ error: { code: "storage_unavailable", message: "قاعدة البيانات غير قابلة للوصول." } });
+    const parsed = z.object({ tenantId: z.string().uuid(), agentId: z.string().uuid(), version: z.string().min(1).max(32), systemPrompt: z.string().min(10).max(20000) }).safeParse({ ...req.params, ...req.body });
+    if (!parsed.success) return res.status(400).json({ error: { code: "invalid_request", details: parsed.error.flatten() } });
+    const result = await createAgentVersion(parsed.data);
+    if ("notFound" in result) return res.status(404).json({ error: { code: "agent_not_found", message: "Agent غير موجود داخل هذا الـ tenant." } });
+    return res.json({ data: { id: result.id, version: result.version, status: result.status } });
+  });
+
+  app.post("/v1/system/tenants/:tenantId/agents/:agentId/rollback", requireAdmin, async (req: Request, res: Response) => {
+    if (!(await getDb())) return res.status(503).json({ error: { code: "storage_unavailable", message: "قاعدة البيانات غير قابلة للوصول." } });
+    const parsed = z.object({ tenantId: z.string().uuid(), agentId: z.string().uuid(), toVersionId: z.string().uuid() }).safeParse({ ...req.params, ...req.body });
+    if (!parsed.success) return res.status(400).json({ error: { code: "invalid_request", details: parsed.error.flatten() } });
+    const target = (await listAgentVersions(parsed.data.tenantId, parsed.data.agentId)).find(item => item.id === parsed.data.toVersionId);
+    if (!target) return res.status(404).json({ error: { code: "version_not_found", message: "النسخة المطلوبة غير موجودة لهذا الوكيل." } });
+    const result = await createAgentVersion({ tenantId: parsed.data.tenantId, agentId: parsed.data.agentId, version: `rb-${Date.now()}`, systemPrompt: target.systemPrompt });
+    if ("notFound" in result) return res.status(404).json({ error: { code: "agent_not_found", message: "Agent غير موجود داخل هذا الـ tenant." } });
+    return res.json({ data: { id: result.id, version: result.version, restoredFrom: target.version, status: result.status } });
   });
 }

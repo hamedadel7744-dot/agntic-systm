@@ -68,6 +68,9 @@ X-API-Key: nova_...
 - `GET /v1/system/tenants/:tenantId/runs` — آخر 20 تشغيل مع الحالة والخطأ.
 - `GET/POST /v1/system/tenants/:tenantId/agents/:agentId/knowledge` — عرض/إضافة مصادر معرفة (التضمين best-effort).
 - `DELETE /v1/system/knowledge/:knowledgeId?tenantId=...` — حذف مصدر.
+- `GET /v1/system/tenants/:tenantId/agents/:agentId/versions` — قائمة نسخ الوكيل (الأحدث أولًا).
+- `POST /v1/system/tenants/:tenantId/agents/:agentId/versions` — نشر نسخة جديدة `{ "version": "1.1.0", "systemPrompt": "..." }` — آخر نسخة هي النشطة.
+- `POST /v1/system/tenants/:tenantId/agents/:agentId/rollback` — تراجع كنسخة جديدة منسوخة `{ "toVersionId": "..." }` — التاريخ append-only، وكل نشر/تراجع يتسجل كصف deployment.
 
 ## Environment variables
 

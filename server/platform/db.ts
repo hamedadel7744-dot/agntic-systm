@@ -226,6 +226,26 @@ export async function listRecentRuns(tenantId: string, limit = 20) {
   return rows.map(row => ({ ...row, input: row.input.slice(0, 120) }));
 }
 
+export async function listAgentVersions(tenantId: string, agentId: string) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select({ id: platformAgentVersions.id, version: platformAgentVersions.version, systemPrompt: platformAgentVersions.systemPrompt, status: platformAgentVersions.status, createdAt: platformAgentVersions.createdAt }).from(platformAgentVersions).innerJoin(platformAgents, eq(platformAgents.id, platformAgentVersions.agentId)).where(and(eq(platformAgentVersions.agentId, agentId), eq(platformAgents.tenantId, tenantId))).orderBy(desc(platformAgentVersions.createdAt));
+}
+
+/** Append-only versioning: publishing creates a new version (latest wins at runtime),
+ * and rollback copies an old prompt forward as a new version so history is never rewritten.
+ * Every publish/rollback is audited as a production deployment row. */
+export async function createAgentVersion(input: { tenantId: string; agentId: string; version: string; systemPrompt: string }) {
+  const db = await getDb();
+  const id = newId();
+  if (!db) return { id, ...input, status: "draft" as const };
+  const agent = (await db.select({ id: platformAgents.id }).from(platformAgents).where(and(eq(platformAgents.id, input.agentId), eq(platformAgents.tenantId, input.tenantId))).limit(1))[0];
+  if (!agent) return { id, notFound: true as const };
+  await db.insert(platformAgentVersions).values({ id, agentId: input.agentId, version: input.version.slice(0, 32), systemPrompt: input.systemPrompt, config: "{}", status: "published" });
+  await db.insert(platformDeployments).values({ id: newId(), tenantId: input.tenantId, agentId: input.agentId, agentVersionId: id, environment: "production", status: "active" });
+  return (await db.select().from(platformAgentVersions).where(eq(platformAgentVersions.id, id)).limit(1))[0];
+}
+
 export async function resolveConversation(input: { tenantId: string; agentId: string; conversationId?: string; externalSessionId?: string }) {
   const db = await getDb();
   if (!db) return { id: input.conversationId ?? newId(), messages: [] as Array<{ role: "user" | "assistant" | "tool"; content: string }> };

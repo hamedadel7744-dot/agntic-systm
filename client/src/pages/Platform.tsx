@@ -30,7 +30,165 @@ export default function Platform() {
 
 <Card className="rounded-[26px] border-[#e7ebf2] bg-white shadow-sm"><CardHeader><CardTitle className="flex items-center gap-2 text-base font-black"><Activity className="h-4 w-4 text-[#6376df]" />Golden Path — تشغيل حقيقي</CardTitle></CardHeader><CardContent><div className="grid gap-3 sm:grid-cols-4"><PathStep icon={KeyRound} label="Identity" done={Boolean(tenantId)} /><PathStep icon={Database} label="Tenant" done={Boolean(tenantId)} /><PathStep icon={Bot} label="Agent" done={Boolean(agentId)} /><PathStep icon={Play} label="Execution" done={Boolean(result)} /></div><div className="my-6 h-px bg-[#eef1f5]" /><div className="grid gap-4 md:grid-cols-[1fr_auto]"><div><label className="mb-2 block text-xs font-bold">رسالة اختبار Runtime</label><Input value={runInput} onChange={e => setRunInput(e.target.value)} className="h-11 rounded-xl text-xs" /></div><Button disabled={!apiKey || !agentId || run.isPending} onClick={() => run.mutate({ apiKey, agentId, input: runInput })} className="h-11 self-end rounded-xl bg-[#198a6a] px-6 text-xs font-bold text-white hover:bg-[#147758]"><Terminal className="ml-2 h-4 w-4" />{run.isPending ? "جارٍ التشغيل..." : "تشغيل الوكيل"}</Button></div>{result && <div className={`mt-5 rounded-2xl p-4 ${result.status === "succeeded" ? "bg-[#f4fcf8]" : "bg-[#fff7ee]"}`}><div className="flex items-center justify-between gap-3"><div className="flex items-center gap-2 text-xs font-black"><span className={`h-2 w-2 rounded-full ${result.status === "succeeded" ? "bg-[#35c29a]" : "bg-[#f2a65a]"}`} />{result.status}</div><Badge className="border-0 bg-white text-[10px] text-[#526079]">{result.tokensUsed} tokens</Badge></div><p className="mt-3 whitespace-pre-wrap text-xs leading-6 text-[#526079]">{result.answer}</p><div className="mt-3 grid gap-2 text-[10px] text-[#98a4b5] sm:grid-cols-2"><span>Run: {result.runId || "—"}</span><span>Trace: {result.traceId || "—"}</span></div></div>}{overview.data && <div className="mt-6 grid gap-3 sm:grid-cols-3"><MiniStat icon={WalletCards} label="Usage" value={`${overview.data.usage.used} / ${overview.data.usage.quota}`} /><MiniStat icon={Bot} label="Agents" value={overview.data.agents.length} /><MiniStat icon={Activity} label="Runs" value={overview.data.runs.length} /></div>}</CardContent></Card></div>
 
-<Card className="mt-5 rounded-[26px] border-[#e7ebf2] bg-[#101b35] text-white shadow-xl"><CardContent className="grid gap-6 p-6 md:grid-cols-[1fr_auto] md:items-center"><div><div className="flex items-center gap-2 text-[11px] font-black uppercase tracking-[.16em] text-[#9af0d3]"><Terminal className="h-4 w-4" />Developer Gateway</div><h2 className="mt-3 text-xl font-black">العقد الخارجي جاهز للأنظمة الأربعة</h2><p className="mt-2 max-w-2xl text-xs leading-6 text-white/50">يمكن لكل مشروع استخدام نفس العقد عبر REST أو Widget: x-api-key، agentId، input. الأسرار لا تدخل سياق النموذج، وكل تشغيل يحصل على runId وtraceId.</p></div><pre dir="ltr" className="overflow-auto rounded-2xl border border-white/10 bg-black/20 p-4 text-[10px] leading-5 text-[#b8f8e1]">{`POST /v1/runs\nX-API-Key: nova_...\n\n{\n  "agentId": "...",\n  "input": "..."\n}`}</pre></CardContent></Card><TenantsAdmin /><KnowledgeAdmin /></div></div>;
+<Card className="mt-5 rounded-[26px] border-[#e7ebf2] bg-[#101b35] text-white shadow-xl"><CardContent className="grid gap-6 p-6 md:grid-cols-[1fr_auto] md:items-center"><div><div className="flex items-center gap-2 text-[11px] font-black uppercase tracking-[.16em] text-[#9af0d3]"><Terminal className="h-4 w-4" />Developer Gateway</div><h2 className="mt-3 text-xl font-black">العقد الخارجي جاهز للأنظمة الأربعة</h2><p className="mt-2 max-w-2xl text-xs leading-6 text-white/50">يمكن لكل مشروع استخدام نفس العقد عبر REST أو Widget: x-api-key، agentId، input. الأسرار لا تدخل سياق النموذج، وكل تشغيل يحصل على runId وtraceId.</p></div><pre dir="ltr" className="overflow-auto rounded-2xl border border-white/10 bg-black/20 p-4 text-[10px] leading-5 text-[#b8f8e1]">{`POST /v1/runs\nX-API-Key: nova_...\n\n{\n  "agentId": "...",\n  "input": "..."\n}`}</pre></CardContent></Card><TenantsAdmin /><KnowledgeAdmin /><VersionsAdmin /></div></div>;
+}
+
+function VersionsAdmin() {
+  const [token, setToken] = useState(() => localStorage.getItem("platformAdminToken") ?? "");
+  const [tenants, setTenants] = useState<TenantRow[]>([]);
+  const [tenantId, setTenantId] = useState("");
+  const [agentId, setAgentId] = useState("");
+  const [versions, setVersions] = useState<VersionRow[]>([]);
+  const [versionLabel, setVersionLabel] = useState("");
+  const [prompt, setPrompt] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  const loadTenants = async () => {
+    if (!token) return;
+    try {
+      const res = await fetch("/v1/system/tenants", { headers: { "x-admin-token": token } });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body?.error?.message ?? "فشل تحميل العملاء");
+      setTenants(body.data ?? []);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  useEffect(() => {
+    if (token) loadTenants();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const loadVersions = async (tid: string, aid: string) => {
+    setError("");
+    try {
+      const res = await fetch(`/v1/system/tenants/${tid}/agents/${aid}/versions`, { headers: { "x-admin-token": token } });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body?.error?.message ?? "فشل تحميل النسخ");
+      setVersions(body.data ?? []);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const selectTenant = (value: string) => {
+    setTenantId(value);
+    setAgentId("");
+    setVersions([]);
+    const tenant = tenants.find(item => item.id === value);
+    if (tenant && tenant.agents.length === 1) {
+      setAgentId(tenant.agents[0].id);
+      loadVersions(tenant.id, tenant.agents[0].id);
+    }
+  };
+
+  const selectAgent = (value: string) => {
+    setAgentId(value);
+    if (tenantId) loadVersions(tenantId, value);
+  };
+
+  const publish = async () => {
+    if (!tenantId || !agentId) return;
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const res = await fetch(`/v1/system/tenants/${tenantId}/agents/${agentId}/versions`, { method: "POST", headers: { "Content-Type": "application/json", "x-admin-token": token }, body: JSON.stringify({ version: versionLabel.trim(), systemPrompt: prompt }) });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body?.error?.message ?? "فشل نشر النسخة");
+      setNotice(`تم نشر النسخة ${body.data?.version} — وهي النشطة الآن (آخر نسخة تفوز).`);
+      setVersionLabel("");
+      setPrompt("");
+      await loadVersions(tenantId, agentId);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const rollback = async (toVersionId: string, label: string) => {
+    if (!tenantId || !agentId) return;
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const res = await fetch(`/v1/system/tenants/${tenantId}/agents/${agentId}/rollback`, { method: "POST", headers: { "Content-Type": "application/json", "x-admin-token": token }, body: JSON.stringify({ toVersionId }) });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body?.error?.message ?? "فشل التراجع");
+      setNotice(`تم التراجع لمحتوى النسخة ${label} كنسخة جديدة ${body.data?.version} — التاريخ كامل ومحفوظ.`);
+      await loadVersions(tenantId, agentId);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card className="mt-5 rounded-[26px] border-[#e7ebf2] bg-white shadow-sm">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base font-black"><Bot className="h-4 w-4 text-[#6376df]" />نسخ الوكيل — نشر وتراجع</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid gap-3 md:grid-cols-[1fr_auto]">
+          <div>
+            <label className="mb-2 block text-xs font-bold">توكن المدير</label>
+            <Input type="password" value={token} onChange={e => setToken(e.target.value)} className="h-11 rounded-xl text-xs" dir="ltr" />
+          </div>
+          <Button onClick={loadTenants} disabled={!token} className="h-11 self-end rounded-xl bg-[#101b35] px-6 text-xs font-bold text-white hover:bg-[#1b2c52]"><RefreshCw className="ml-2 h-4 w-4" />تحميل العملاء</Button>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div>
+            <label className="mb-2 block text-xs font-bold">العميل</label>
+            <select value={tenantId} onChange={e => selectTenant(e.target.value)} className="h-11 w-full rounded-xl border border-[#dfe6ee] bg-white px-3 text-xs font-bold outline-none focus:border-[#35c29a]">
+              <option value="">اختر عميلًا…</option>
+              {tenants.map(tenant => <option key={tenant.id} value={tenant.id}>{tenant.name}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="mb-2 block text-xs font-bold">الوكيل</label>
+            <select value={agentId} onChange={e => selectAgent(e.target.value)} disabled={!tenantId} className="h-11 w-full rounded-xl border border-[#dfe6ee] bg-white px-3 text-xs font-bold outline-none focus:border-[#35c29a] disabled:opacity-50">
+              <option value="">اختر وكيلًا…</option>
+              {(tenants.find(tenant => tenant.id === tenantId)?.agents ?? []).map(agent => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
+            </select>
+          </div>
+        </div>
+        {error && <div className="rounded-2xl border border-[#f3c2c2] bg-[#fdeeee] p-3 text-xs font-bold text-[#c0392b]">{error}</div>}
+        {notice && <div className="rounded-2xl border border-[#bfeedd] bg-[#f4fcf8] p-3 text-xs font-bold text-[#198a6a]">{notice}</div>}
+        {tenantId && agentId && (
+          <>
+            <div className="space-y-2">
+              {versions.length === 0 && <p className="text-xs text-[#98a4b5]">لا نسخ لهذا الوكيل بعد.</p>}
+              {versions.map((item, index) => (
+                <div key={item.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-[#f7f8fb] px-3 py-2">
+                  <div className="flex flex-wrap items-center gap-2 text-[10px] font-bold text-[#526079]">
+                    <code dir="ltr" className="text-xs">{item.version}</code>
+                    {index === 0 ? <Badge className="border-0 bg-[#f4fcf8] text-[9px] text-[#198a6a]">النشطة</Badge> : <Badge className="border-0 bg-white text-[9px] text-[#98a4b5]">سابقة</Badge>}
+                    <span className="max-w-[320px] truncate" title={item.systemPrompt}>{item.systemPrompt.slice(0, 80)}</span>
+                    <span className="text-[#98a4b5]">{new Date(item.createdAt).toLocaleString("ar-EG")}</span>
+                  </div>
+                  {index !== 0 && <Button onClick={() => rollback(item.id, item.version)} disabled={busy} className="h-7 rounded-lg bg-[#fff7ee] px-3 text-[10px] font-bold text-[#b06f1f] hover:bg-[#fdeed8]"><RotateCcw className="ml-1 h-3 w-3" />تراجع لهذه</Button>}
+                </div>
+              ))}
+            </div>
+            <div className="my-2 h-px bg-[#eef1f5]" />
+            <div className="space-y-3">
+              <div className="grid gap-3 md:grid-cols-[220px_1fr]">
+                <div><label className="mb-2 block text-xs font-bold">رقم النسخة</label><Input value={versionLabel} onChange={e => setVersionLabel(e.target.value)} placeholder="1.1.0" className="h-11 rounded-xl text-xs" dir="ltr" /></div>
+                <div><label className="mb-2 block text-xs font-bold">System Prompt الجديد</label><textarea value={prompt} onChange={e => setPrompt(e.target.value)} className="min-h-20 w-full rounded-xl border border-[#dfe6ee] bg-white p-3 text-xs leading-6 outline-none focus:border-[#35c29a]" /></div>
+              </div>
+              <p className="text-[10px] leading-5 text-[#98a4b5]">آخر نسخة هي النشطة تلقائيًا في الـ runtime. التراجع بينسخ محتوى نسخة قديمة كنسخة جديدة — التاريخ عمره ما بيتكتب فوقه.</p>
+              <Button onClick={publish} disabled={busy || versionLabel.trim().length < 1 || prompt.trim().length < 10} className="h-11 w-full rounded-xl bg-[#198a6a] text-xs font-bold text-white hover:bg-[#147758]"><Plus className="ml-2 h-4 w-4" />{busy ? "جارٍ النشر..." : "نشر نسخة جديدة"}</Button>
+            </div>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
 }
 
 function KnowledgeAdmin() {
@@ -193,6 +351,7 @@ type TenantKeyRow = { id: string; label: string; keyPrefix: string; revokedAt: s
 type TenantRow = { id: string; name: string; plan: string; status: string; tokenQuota: number; tokenUsedThisCycle: number; agents: Array<{ id: string; name: string }>; keys: TenantKeyRow[] };
 type KnowledgeRow = { id: string; title: string; sourceType: string; status: string; hasEmbedding: boolean; createdAt: string };
 type RunRow = { id: string; status: string; error: string | null; input: string; tokensUsed: number; traceId: string; createdAt: string };
+type VersionRow = { id: string; version: string; systemPrompt: string; status: string; createdAt: string };
 
 function TenantsAdmin() {
   const [token, setToken] = useState(() => localStorage.getItem("platformAdminToken") ?? "");
