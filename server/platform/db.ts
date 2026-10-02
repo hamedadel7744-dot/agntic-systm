@@ -51,6 +51,14 @@ export async function getAgentScoped(tenantId: string, agentId: string) {
   return rows[0];
 }
 
+/** Plug-and-play: an API key alone must be enough to run the platform, so the
+ * tenant's first agent is the default when no agentId is provided. */
+export async function resolveDefaultAgent(tenantId: string) {
+  const db = await getDb();
+  if (!db) return undefined;
+  return (await db.select({ id: platformAgents.id, name: platformAgents.name }).from(platformAgents).where(eq(platformAgents.tenantId, tenantId)).orderBy(platformAgents.createdAt).limit(1))[0];
+}
+
 export async function createRun(input: { tenantId: string; agentId: string; input: string; traceId: string; conversationId?: string }) {
   const db = await getDb();
   const id = newId();

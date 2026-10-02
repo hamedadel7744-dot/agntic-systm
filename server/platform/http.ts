@@ -1,14 +1,14 @@
 import type { Express, Request, Response } from "express";
 import { z } from "zod";
 import { executeRun, listPlatformTools } from "./runtime";
-import { findTenantByApiKey } from "./db";
+import { findTenantByApiKey, resolveDefaultAgent } from "./db";
 import { getDb } from "../db";
 import { checkRateLimit, RateBucket } from "./rate-limit";
 
 const RUNS_RATE_LIMIT_PER_MIN = Number(process.env.RUNS_RATE_LIMIT_PER_MIN ?? 60);
 const runsRateBuckets = new Map<string, RateBucket>();
 
-const runSchema = z.object({ agentId: z.string().uuid(), input: z.string().min(1).max(8000), conversationId: z.string().uuid().optional(), externalSessionId: z.string().max(255).optional(), metadata: z.record(z.string(), z.unknown()).optional() });
+const runSchema = z.object({ agentId: z.string().uuid().optional(), input: z.string().min(1).max(8000), conversationId: z.string().uuid().optional(), externalSessionId: z.string().max(255).optional(), metadata: z.record(z.string(), z.unknown()).optional() });
 
 function readApiKey(req: Request) {
   const direct = req.header("x-api-key");
@@ -54,8 +54,15 @@ export function registerPlatformHttp(app: Express) {
     }
     const parsed = runSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: { code: "invalid_request", details: parsed.error.flatten() } });
-    const outcome = await executeRun({ tenantId: resolved.tenant.id, ...parsed.data });
+    // Key-only integration: without agentId, the tenant's default agent runs.
+    let agentId = parsed.data.agentId;
+    if (!agentId) {
+      const fallback = await resolveDefaultAgent(resolved.tenant.id);
+      if (!fallback) return res.status(404).json({ error: { code: "no_agent", message: "لا يوجد وكيل لهذا الحساب بعد — أنشئ وكيلًا من لوحة التحكم أو مرر agentId صريحًا." } });
+      agentId = fallback.id;
+    }
+    const outcome = await executeRun({ tenantId: resolved.tenant.id, agentId, input: parsed.data.input, conversationId: parsed.data.conversationId, externalSessionId: parsed.data.externalSessionId });
     const statusCode = outcome.status === "failed" ? 422 : 200;
-    return res.status(statusCode).json({ data: outcome });
+    return res.status(statusCode).json({ data: outcome, agentId });
   });
 }

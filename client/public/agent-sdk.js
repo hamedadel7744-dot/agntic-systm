@@ -1,7 +1,8 @@
-/* Nova Agent SDK v1: same contract used by Web, Mobile, and Backend integrations. */
+/* Nova Agent SDK v1: same contract used by Web, Mobile, and Backend integrations.
+ * Key-only mode: apiKey alone runs the tenant's default agent; pass agentId to target a specific one. */
 (function (global) {
   function createClient(options) {
-    if (!options || !options.baseUrl || !options.apiKey || !options.agentId) throw new Error("baseUrl, apiKey, and agentId are required");
+    if (!options || !options.baseUrl || !options.apiKey) throw new Error("baseUrl and apiKey are required (agentId is optional — defaults to the tenant's first agent)");
     async function run(input, extra) {
       var response = await fetch(options.baseUrl.replace(/\/$/, "") + "/v1/runs", {
         method: "POST",
@@ -14,5 +15,5 @@
     }
     return { run: run };
   }
-  global.NovaAgent = { createClient: createClient, version: "1.0.0" };
+  global.NovaAgent = { createClient: createClient, version: "1.1.0" };
 })(window);

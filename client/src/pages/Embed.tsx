@@ -12,7 +12,9 @@ export default function Embed() {
   // legacy demo chat so old embeds keep working.
   const agentKey = params.get("agentKey") ?? "";
   const agentId = params.get("agentId") ?? "";
-  const platformMode = Boolean(agentKey && agentId);
+  // Key-only integration: the server resolves the tenant's default agent when
+  // agentId is absent, so the key alone activates the real runtime.
+  const platformMode = Boolean(agentKey);
   const [messages, setMessages] = useState<Message[]>([]);
   const [platformPending, setPlatformPending] = useState(false);
   const chat = trpc.ai.chat.useMutation({ onSuccess: result => setMessages(current => [...current, { role: "assistant", content: result.answer }]) });
@@ -29,7 +31,7 @@ export default function Embed() {
       const res = await fetch("/v1/runs", {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-API-Key": agentKey },
-        body: JSON.stringify({ agentId, input: message, externalSessionId: sessionRef.current, metadata: { page: params.get("page") ?? window.location.pathname } }),
+        body: JSON.stringify({ ...(agentId ? { agentId } : {}), input: message, externalSessionId: sessionRef.current, metadata: { page: params.get("page") ?? window.location.pathname } }),
       });
       const body = await res.json();
       // Failed runs still return a structured outcome with an honest answer; HTTP

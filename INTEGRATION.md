@@ -1,6 +1,14 @@
 # Nova Agent Platform — Integration contract
 
-هذه المنصة Modular Monolith متعددة المستأجرين. كل مشروع خارجي يتصل عبر API Key وAgent، ولا يحصل الـ LLM على أسرار أو وصول مباشر لقاعدة البيانات.
+هذه المنصة Modular Monolith متعددة المستأجرين. كل مشروع خارجي يتصل عبر API Key، ولا يحصل الـ LLM على أسرار أو وصول مباشر لقاعدة البيانات.
+
+## التكامل في سطر واحد
+
+```html
+<script src="https://YOUR_AGENT_DOMAIN/widget.js" data-agent-key="nova_..."></script>
+```
+
+المفتاح لوحده كفاية: السيرفر بيشتغل على الوكيل الافتراضي للعميل (أول وكيل اتعمل). عايز وكيل معين؟ ضيف `data-agent-id`. نفس الفلسفة في كل الأسطح: `agentId` اختياري في الـ REST والـ SDK والويدجت.
 
 ## REST Gateway v1
 
@@ -10,13 +18,13 @@ Content-Type: application/json
 X-API-Key: nova_...
 
 {
-  "agentId": "uuid",
+  "agentId": "uuid-اختياري",
   "input": "كيف أبدأ استخدام النظام؟",
   "metadata": { "system": "market-hub", "page": "/orders" }
 }
 ```
 
-الاستجابة تحتوي على `runId`, `traceId`, `status`, `answer`, `tokensUsed`, و`toolCalls`.
+الاستجابة تحتوي على `runId`, `traceId`, `status`, `answer`, `tokensUsed`, و`toolCalls`، ومعها `agentId` المُستخدم فعليًا. لو مفيش وكيل للحساب بترجع 404 بكود `no_agent`.
 
 - `GET /v1/health` — فحص الخدمة السريع.
 - `GET /api/system/health` — تقرير تشخيص شامل (قاعدة البيانات، السكيما، pgvector، متغيرات البيئة، المزود، الأدوات، الحوادث).
