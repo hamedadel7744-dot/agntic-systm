@@ -1,6 +1,6 @@
 import type { Express, Request, Response } from "express";
 import { z } from "zod";
-import { addKnowledge, deleteKnowledge, listKnowledgeForAgent, listTenantsWithKeys, revokeTenantKey, rotateTenantKey } from "./db";
+import { addKnowledge, deleteKnowledge, listKnowledgeForAgent, listRecentRuns, listTenantsWithKeys, revokeTenantKey, rotateTenantKey, setTenantStatus } from "./db";
 import { getDb } from "../db";
 
 /**
@@ -63,5 +63,21 @@ export function registerSystemAdminHttp(app: Express) {
     const parsed = z.object({ knowledgeId: z.string().uuid(), tenantId: z.string().uuid() }).safeParse({ knowledgeId: req.params.knowledgeId, tenantId: req.query.tenantId });
     if (!parsed.success) return res.status(400).json({ error: { code: "invalid_request", details: parsed.error.flatten() } });
     return res.json({ data: await deleteKnowledge(parsed.data.tenantId, parsed.data.knowledgeId) });
+  });
+
+  app.post("/v1/system/tenants/:tenantId/status", requireAdmin, async (req: Request, res: Response) => {
+    if (!(await getDb())) return res.status(503).json({ error: { code: "storage_unavailable", message: "قاعدة البيانات غير قابلة للوصول." } });
+    const parsed = z.object({ tenantId: z.string().uuid(), status: z.enum(["active", "suspended"]) }).safeParse({ tenantId: req.params.tenantId, status: req.body?.status });
+    if (!parsed.success) return res.status(400).json({ error: { code: "invalid_request", details: parsed.error.flatten() } });
+    const result = await setTenantStatus(parsed.data.tenantId, parsed.data.status);
+    if (!result.updated) return res.status(404).json({ error: { code: "tenant_not_found", message: "Tenant غير موجود." } });
+    return res.json({ data: result });
+  });
+
+  app.get("/v1/system/tenants/:tenantId/runs", requireAdmin, async (req: Request, res: Response) => {
+    if (!(await getDb())) return res.status(503).json({ error: { code: "storage_unavailable", message: "قاعدة البيانات غير قابلة للوصول." } });
+    const parsed = z.object({ tenantId: z.string().uuid() }).safeParse(req.params);
+    if (!parsed.success) return res.status(400).json({ error: { code: "invalid_request", details: parsed.error.flatten() } });
+    return res.json({ data: await listRecentRuns(parsed.data.tenantId) });
   });
 }

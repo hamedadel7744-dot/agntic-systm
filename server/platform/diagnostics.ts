@@ -90,7 +90,7 @@ function envAudit(): EnvAuditItem[] {
   return [
     item("DATABASE_URL", "critical", "بدونها يعمل النظام ببيانات تجريبية فقط وكل عمليات الـ platform تُرفض.", "أضف DATABASE_URL بصيغة postgresql://user:pass@host:6543/postgres في متغيرات البيئة."),
     item("JWT_SECRET", "critical", "توقيع جلسات الداشبورد؛ بدونه لا يمكن الاعتماد على المصادقة.", "أضف JWT_SECRET كنص عشوائي طويل (32 حرفًا أو أكثر)."),
-    item("BUILT_IN_FORGE_API_KEY", "critical", "النموذج اللغوي؛ بدونها كل الـ runs تفشل برسالة OPENAI_API_KEY is not configured.", "أضف BUILT_IN_FORGE_API_KEY بمفتاح المزود المتوافق مع OpenAI."),
+    item("BUILT_IN_FORGE_API_KEY", "critical", "النموذج اللغوي؛ بدونها كل الـ runs تفشل فورًا عند استدعاء المزود.", "أضف BUILT_IN_FORGE_API_KEY بمفتاح المزود المتوافق مع OpenAI."),
     item("BUILT_IN_FORGE_API_URL", "info", "افتراضيًا forge.manus.im؛ يمكن توجيهه لأي مزود متوافق مع OpenAI.", "اختياري: أضف BUILT_IN_FORGE_API_URL=https://api.openai.com أو أي مزود متوافق."),
     item("OAUTH_SERVER_URL", "warn", "تسجيل الدخول إلى الداشبورد معطّل بدونه، والواجهات المحمية لن تعمل.", "أضف OAUTH_SERVER_URL الخاص بمزود OAuth، أو تجاهل التحذير إذا كان الوصول عبر الـ API فقط مقصودًا."),
     item("VITE_APP_ID", "warn", "معرّف التطبيق أمام مزود OAuth.", "اختياري الآن؛ يلزم عند تفعيل تسجيل الدخول."),
@@ -166,7 +166,7 @@ async function runLlmChecks(checks: DiagCheck[]): Promise<void> {
       group: "llm",
       title: "مفتاح النموذج اللغوي",
       status: "fail",
-      detail: "لا يوجد BUILT_IN_FORGE_API_KEY، لذلك كل تشغيلات الوكيل تفشل برسالة OPENAI_API_KEY is not configured.",
+      detail: "لا يوجد BUILT_IN_FORGE_API_KEY، لذلك كل تشغيلات الوكيل تفشل فورًا عند استدعاء النموذج.",
       cause: "متغير مفتاح المزود غير مضبوط في بيئة التشغيل.",
       fix: "أضف BUILT_IN_FORGE_API_KEY على Vercel (يمكن استخدام مفتاح OpenAI مع BUILT_IN_FORGE_API_URL=https://api.openai.com) ثم أعد النشر.",
     });

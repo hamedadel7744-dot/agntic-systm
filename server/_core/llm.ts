@@ -222,7 +222,8 @@ const resolveApiUrl = () => `${getLlmApiBase()}/v1/chat/completions`;
 
 const assertApiKey = () => {
   if (!ENV.forgeApiKey) {
-    throw new Error("OPENAI_API_KEY is not configured");
+    // Name the real variable — a wrong hint here sends people configuring the wrong env var.
+    throw new Error("BUILT_IN_FORGE_API_KEY is not configured");
   }
 };
 

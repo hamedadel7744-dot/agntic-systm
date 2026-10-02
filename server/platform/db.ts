@@ -207,8 +207,23 @@ export async function rotateTenantKey(tenantId: string, label = "rotated") {
 export async function revokeTenantKey(tenantId: string, keyId: string) {
   const db = await getDb();
   if (!db) return { revoked: 0 };
-  const result = await db.update(platformApiKeys).set({ revokedAt: new Date() }).where(and(eq(platformApiKeys.id, keyId), eq(platformApiKeys.tenantId, tenantId), sql`${platformApiKeys.revokedAt} IS NULL`)).returning({ id: platformApiKeys.id });
-  return { revoked: result.length };
+  const rows = await db.update(platformApiKeys).set({ revokedAt: new Date() }).where(and(eq(platformApiKeys.id, keyId), eq(platformApiKeys.tenantId, tenantId), sql`${platformApiKeys.revokedAt} IS NULL`)).returning({ id: platformApiKeys.id });
+  return { revoked: rows.length };
+}
+
+export async function setTenantStatus(tenantId: string, status: "active" | "suspended" | "deleted") {
+  const db = await getDb();
+  if (!db) return { updated: 0 };
+  const rows = await db.update(platformTenants).set({ status }).where(eq(platformTenants.id, tenantId)).returning({ id: platformTenants.id });
+  return { updated: rows.length };
+}
+
+export async function listRecentRuns(tenantId: string, limit = 20) {
+  const db = await getDb();
+  if (!db) return [];
+  const rows = await db.select({ id: platformRuns.id, status: platformRuns.status, error: platformRuns.error, input: platformRuns.input, tokensUsed: platformRuns.tokensUsed, traceId: platformRuns.traceId, createdAt: platformRuns.createdAt }).from(platformRuns).where(eq(platformRuns.tenantId, tenantId)).orderBy(desc(platformRuns.createdAt)).limit(limit);
+  // Input is truncated for the control-plane view; the full value stays in the row.
+  return rows.map(row => ({ ...row, input: row.input.slice(0, 120) }));
 }
 
 export async function resolveConversation(input: { tenantId: string; agentId: string; conversationId?: string; externalSessionId?: string }) {

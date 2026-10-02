@@ -192,6 +192,7 @@ function KnowledgeAdmin() {
 type TenantKeyRow = { id: string; label: string; keyPrefix: string; revokedAt: string | null; lastUsedAt: string | null; createdAt: string };
 type TenantRow = { id: string; name: string; plan: string; status: string; tokenQuota: number; tokenUsedThisCycle: number; agents: Array<{ id: string; name: string }>; keys: TenantKeyRow[] };
 type KnowledgeRow = { id: string; title: string; sourceType: string; status: string; hasEmbedding: boolean; createdAt: string };
+type RunRow = { id: string; status: string; error: string | null; input: string; tokensUsed: number; traceId: string; createdAt: string };
 
 function TenantsAdmin() {
   const [token, setToken] = useState(() => localStorage.getItem("platformAdminToken") ?? "");
@@ -200,6 +201,7 @@ function TenantsAdmin() {
   const [error, setError] = useState("");
   const [freshKey, setFreshKey] = useState<{ key: string; label: string } | null>(null);
   const [copied, setCopied] = useState(false);
+  const [runsFor, setRunsFor] = useState<{ tenantId: string; rows: RunRow[] } | null>(null);
 
   const load = async () => {
     if (!token) return;
@@ -249,6 +251,34 @@ function TenantsAdmin() {
     }
   };
 
+  const toggleStatus = async (tenantId: string, status: "active" | "suspended") => {
+    setError("");
+    try {
+      const res = await fetch(`/v1/system/tenants/${tenantId}/status`, { method: "POST", headers: { "Content-Type": "application/json", "x-admin-token": token }, body: JSON.stringify({ status }) });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body?.error?.message ?? "فشل تغيير حالة العميل");
+      await load();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const showRuns = async (tenantId: string) => {
+    if (runsFor?.tenantId === tenantId) {
+      setRunsFor(null);
+      return;
+    }
+    setError("");
+    try {
+      const res = await fetch(`/v1/system/tenants/${tenantId}/runs`, { headers: { "x-admin-token": token } });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body?.error?.message ?? "فشل تحميل السجل");
+      setRunsFor({ tenantId, rows: body.data ?? [] });
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
   const copyFresh = async () => {
     if (!freshKey) return;
     await navigator.clipboard?.writeText(freshKey.key);
@@ -286,12 +316,21 @@ function TenantsAdmin() {
         {tenants.map(tenant => (
           <div key={tenant.id} className="rounded-2xl border border-[#eef1f5] p-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <span className="text-sm font-black">{tenant.name}</span>
                 <Badge className="border-0 bg-[#f4fcf8] text-[10px] text-[#198a6a]">{tenant.plan}</Badge>
                 <Badge className="border-0 bg-[#f7f8fb] text-[10px] text-[#526079]">{tenant.agents.length} agents</Badge>
+                <Badge className={`border-0 text-[9px] ${tenant.status === "active" ? "bg-[#f4fcf8] text-[#198a6a]" : "bg-[#fff7ee] text-[#b06f1f]"}`}>{tenant.status === "active" ? "نشط" : "موقوف"}</Badge>
               </div>
-              <span className="text-[10px] font-bold text-[#98a4b5]">usage: {tenant.tokenUsedThisCycle} / {tenant.tokenQuota}</span>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] font-bold text-[#98a4b5]">usage: {tenant.tokenUsedThisCycle} / {tenant.tokenQuota}</span>
+                <Button onClick={() => showRuns(tenant.id)} className="h-7 rounded-lg bg-[#f7f8fb] px-3 text-[10px] font-bold text-[#526079] hover:bg-[#eef1f5]"><Activity className="ml-1 h-3 w-3" />{runsFor?.tenantId === tenant.id ? "إخفاء السجل" : "السجل"}</Button>
+                {tenant.status === "active" ? (
+                  <Button onClick={() => toggleStatus(tenant.id, "suspended")} className="h-7 rounded-lg bg-[#fff7ee] px-3 text-[10px] font-bold text-[#b06f1f] hover:bg-[#fdeed8]"><Ban className="ml-1 h-3 w-3" />إيقاف</Button>
+                ) : (
+                  <Button onClick={() => toggleStatus(tenant.id, "active")} className="h-7 rounded-lg bg-[#f4fcf8] px-3 text-[10px] font-bold text-[#198a6a] hover:bg-[#e9f8f2]"><CheckCircle2 className="ml-1 h-3 w-3" />تشغيل</Button>
+                )}
+              </div>
             </div>
             <div className="mt-3 space-y-2">
               {tenant.keys.map(key => (
@@ -310,6 +349,20 @@ function TenantsAdmin() {
               ))}
               {tenant.keys.length === 0 && <p className="text-[10px] text-[#98a4b5]">لا مفاتيح — اضغط تدوير لإنشاء أول مفتاح.</p>}
             </div>
+            {runsFor?.tenantId === tenant.id && (
+              <div className="mt-3 rounded-xl border border-[#eef1f5] bg-[#fafbfd] p-3">
+                <div className="mb-2 text-[10px] font-black text-[#526079]">آخر الـ runs ({runsFor.rows.length})</div>
+                {runsFor.rows.length === 0 && <p className="text-[10px] text-[#98a4b5]">لا runs بعد.</p>}
+                {runsFor.rows.map(run => (
+                  <div key={run.id} className="flex flex-wrap items-center justify-between gap-2 border-b border-[#eef1f5] py-1.5 last:border-0">
+                    <span className={`text-[10px] font-black ${run.status === "succeeded" ? "text-[#198a6a]" : run.status === "failed" ? "text-[#c0392b]" : "text-[#b06f1f]"}`}>{run.status}</span>
+                    <span className="max-w-[260px] truncate text-[10px] text-[#526079]">{run.input || "—"}</span>
+                    {run.error && <span className="max-w-[220px] truncate text-[10px] text-[#c0392b]">{run.error}</span>}
+                    <span className="text-[10px] text-[#98a4b5]">{run.tokensUsed} tk · {new Date(run.createdAt).toLocaleTimeString("ar-EG")}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         ))}
       </CardContent>

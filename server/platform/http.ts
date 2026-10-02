@@ -3,6 +3,10 @@ import { z } from "zod";
 import { executeRun, listPlatformTools } from "./runtime";
 import { findTenantByApiKey } from "./db";
 import { getDb } from "../db";
+import { checkRateLimit, RateBucket } from "./rate-limit";
+
+const RUNS_RATE_LIMIT_PER_MIN = Number(process.env.RUNS_RATE_LIMIT_PER_MIN ?? 60);
+const runsRateBuckets = new Map<string, RateBucket>();
 
 const runSchema = z.object({ agentId: z.string().uuid(), input: z.string().min(1).max(8000), conversationId: z.string().uuid().optional(), externalSessionId: z.string().max(255).optional(), metadata: z.record(z.string(), z.unknown()).optional() });
 
@@ -42,6 +46,12 @@ export function registerPlatformHttp(app: Express) {
     const key = readApiKey(req);
     const resolved = await findTenantByApiKey(key);
     if (!resolved) return res.status(401).json({ error: { code: "invalid_api_key", message: "API key is invalid or tenant is inactive" } });
+    // Admission control: reject bursts politely before they burn quota.
+    const rate = checkRateLimit(runsRateBuckets, resolved.tenant.id, RUNS_RATE_LIMIT_PER_MIN);
+    if (!rate.allowed) {
+      res.setHeader("Retry-After", String(rate.retryAfterSec));
+      return res.status(429).json({ error: { code: "rate_limited", message: `عدد الطلبات تجاوز الحد (${RUNS_RATE_LIMIT_PER_MIN} في الدقيقة لهذا الحساب). حاول بعد ${rate.retryAfterSec} ثانية.` } });
+    }
     const parsed = runSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: { code: "invalid_request", details: parsed.error.flatten() } });
     const outcome = await executeRun({ tenantId: resolved.tenant.id, ...parsed.data });
