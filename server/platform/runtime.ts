@@ -59,6 +59,11 @@ export async function executeRun(request: RunRequest): Promise<RuntimeOutcome> {
   try {
     const evidence = await searchKnowledge(request.tenantId, request.agentId, request.input);
     const evidenceText = evidence.map(item => `مصدر: ${item.title}\n${item.content.slice(0, 1200)}`).join("\n\n");
+    // Guard interlock: an agent answering with zero knowledge hits is a silent
+    // quality failure — record it so tenants can see and fix their knowledge base.
+    if (evidence.length === 0) {
+      await recordEvent({ tenantId: request.tenantId, runId, type: "knowledge.miss", payload: { query: request.input.slice(0, 200) }, traceId });
+    }
     const allowedTools = listPlatformTools().filter(tool => tool.enabled && toolMatchesPolicy(tool.risk, agentConfig.toolPolicy));
     const tools = allowedTools.map(tool => ({ type: "function" as const, function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } }));
     await recordEvent({ tenantId: request.tenantId, runId, type: "run.config", payload: { model: agentConfig.model ?? "platform-default", toolPolicy: agentConfig.toolPolicy, toolsOffered: allowedTools.map(tool => tool.name) }, traceId });
@@ -74,6 +79,8 @@ export async function executeRun(request: RunRequest): Promise<RuntimeOutcome> {
     });
     const message = response.choices?.[0]?.message;
     const usage = response.usage?.total_tokens ?? 0;
+    // Guard interlock: a provider that omits usage makes metering undercount silently.
+    if (usage === 0) await recordEvent({ tenantId: request.tenantId, runId, type: "usage.missing", payload: { hint: "provider returned no usage; token metering may undercount" }, traceId });
     const usageResult = await chargeUsage(request.tenantId, usage, message?.tool_calls?.length ?? 0);
     if (!usageResult.allowed) {
       await updateRun(request.tenantId, runId, { status: "failed", error: usageResult.reason });
@@ -83,6 +90,7 @@ export async function executeRun(request: RunRequest): Promise<RuntimeOutcome> {
     if ((usageResult.overageTokens ?? 0) > 0) await recordEvent({ tenantId: request.tenantId, runId, type: "usage.overage", payload: { overageTokens: usageResult.overageTokens, policy: "billable_overage_until_hard_cap" }, traceId });
 
     const toolCalls = message?.tool_calls ?? [];
+    const failedTools: string[] = [];
     for (const call of toolCalls) {
       const toolName = call.function?.name ?? "unknown";
       const tool = toolRegistry.get(toolName);
@@ -116,12 +124,18 @@ export async function executeRun(request: RunRequest): Promise<RuntimeOutcome> {
         await recordToolCall({ tenantId: request.tenantId, runId, toolName, toolInput: input, status: result.status, output: { result: result.output ?? result.error, verified: true } });
       } catch (error) {
         await recordToolCall({ tenantId: request.tenantId, runId, toolName, toolInput: input, status: "failed", output: { error: error instanceof Error ? error.message : "tool_failed" } });
+        failedTools.push(toolName);
       }
+    }
+    // Guard interlock: tool failures must never hide behind a success-looking answer.
+    if (failedTools.length > 0) {
+      await recordEvent({ tenantId: request.tenantId, runId, type: "run.tool_failures", payload: { tools: failedTools }, traceId });
     }
 
     const baseAnswer = typeof message?.content === "string" ? message.content : "تم تحليل طلبك، لكن لا يوجد رد نصي من النموذج.";
+    const toolFailureNotice = failedTools.length > 0 ? `\n\nتنبيه صادق: الأدوات التالية فشلت أثناء المعالجة: ${failedTools.join("، ")} — العملية لم تكتمل بنجاح كامل، وأعد المحاولة أو راجع الحالة.` : "";
     const usageNotice = (usageResult.overageTokens ?? 0) > 0 ? "\n\nتنبيه حساب: تم تجاوز حصة الباقة الأساسية، وسيُحتسب الاستخدام الزائد حتى الحد الأقصى المسموح." : usageResult.warning ? "\n\nتنبيه حساب: اقتربت من 80% من حصة الاستخدام." : "";
-    const answer = baseAnswer + usageNotice;
+    const answer = baseAnswer + toolFailureNotice + usageNotice;
     await appendMessage({ tenantId: request.tenantId, conversationId: conversation.id, role: "assistant", content: answer, tokensUsed: usage });
     await updateRun(request.tenantId, runId, { status: "succeeded", output: answer, tokensUsed: usage });
     await recordEvent({ tenantId: request.tenantId, runId, type: "run.completed", payload: { tokensUsed: usage }, traceId });

@@ -2,6 +2,7 @@ import type { Express, Request, Response } from "express";
 import { z } from "zod";
 import { addKnowledge, createAgentVersion, deleteKnowledge, listAgentVersions, listKnowledgeForAgent, listRecentRuns, listTenantsWithKeys, revokeTenantKey, rotateTenantKey, setTenantStatus } from "./db";
 import { parseAgentConfig } from "./runtime";
+import { runGuardSweep } from "./guard";
 import { getDb } from "../db";
 
 /**
@@ -112,5 +113,10 @@ export function registerSystemAdminHttp(app: Express) {
     if ("notFound" in result) return res.status(404).json({ error: { code: "agent_not_found", message: "Agent غير موجود داخل هذا الـ tenant." } });
     const effective = parseAgentConfig(result.config ?? "{}");
     return res.json({ data: { id: result.id, version: result.version, restoredFrom: target.version, status: result.status, model: effective.model ?? "platform-default", toolPolicy: effective.toolPolicy } });
+  });
+
+  app.post("/v1/system/guard", requireAdmin, async (_req, res) => {
+    if (!(await getDb())) return res.status(503).json({ error: { code: "storage_unavailable", message: "قاعدة البيانات غير قابلة للوصول." } });
+    return res.json({ data: await runGuardSweep() });
   });
 }

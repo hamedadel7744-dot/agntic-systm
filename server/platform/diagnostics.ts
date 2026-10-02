@@ -5,6 +5,7 @@ import { ENV } from "../_core/env";
 import { getLlmApiBase } from "../_core/llm";
 import { platformEvents, platformRuns } from "../../drizzle/schema";
 import { listPlatformTools } from "./runtime";
+import { collectGuardFindings } from "./guard";
 import "./default-tools";
 
 export type CheckStatus = "ok" | "warn" | "fail";
@@ -42,6 +43,7 @@ export interface DiagnosticsReport {
   meta: { node: string; region: string; uptimeSec: number; dbConfigured: boolean };
   checks: DiagCheck[];
   envAudit: EnvAuditItem[];
+  guardFindings: import("./guard").GuardFinding[];
   incidents: { failedRuns: Incident[]; failedRuns24h: number; usageWarnings: Incident[]; staleRuns: Incident[] };
 }
 
@@ -256,6 +258,13 @@ async function computeDiagnostics(): Promise<DiagnosticsReport> {
     incidents = { failedRuns: [], failedRuns24h: 0, usageWarnings: [], staleRuns: [] };
   }
 
+  let guardFindings: DiagnosticsReport["guardFindings"] = [];
+  try {
+    guardFindings = dbAvailable ? await collectGuardFindings() : [];
+  } catch {
+    guardFindings = [];
+  }
+
   const hasFail = checks.some(check => check.status === "fail");
   const hasWarn = checks.some(check => check.status === "warn");
   const status: CheckStatus = hasFail ? "fail" : hasWarn ? "warn" : "ok";
@@ -273,6 +282,7 @@ async function computeDiagnostics(): Promise<DiagnosticsReport> {
     },
     checks,
     envAudit: envAudit(),
+    guardFindings,
     incidents,
   };
 }

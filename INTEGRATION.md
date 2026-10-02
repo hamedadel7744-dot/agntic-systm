@@ -87,6 +87,14 @@ X-API-Key: nova_...
 - `GET /v1/system/tenants/:tenantId/agents/:agentId/versions` — قائمة نسخ الوكيل (الأحدث أولًا).
 - `POST /v1/system/tenants/:tenantId/agents/:agentId/versions` — نشر نسخة جديدة `{ "version": "1.1.0", "systemPrompt": "..." }` — آخر نسخة هي النشطة.
 - `POST /v1/system/tenants/:tenantId/agents/:agentId/rollback` — تراجع كنسخة جديدة منسوخة `{ "toVersionId": "..." }` — التاريخ append-only، وكل نشر/تراجع يتسجل كصف deployment.
+- `POST /v1/system/guard` — مسح الحارس: إعادة تأهيل الـ runs الزومبي (أقدم من 15 دقيقة) تلقائيًا، + ملاحظات هيكلية (وكلاء بلا نسخة، عملاء بلا وكيل أو مفتاح نشط، معرفة بدون تضمين).
+
+## الحارس — سياسة منع الفشل الصامت
+
+- كل تشغيل يسجل `run.config` (النموذج والسياسة والأدوات المعروضة)، و`knowledge.miss` لو أجاب بدون أي مصدر معرفة، و`usage.missing` لو المزود رجّع صفر توكنز.
+- فشل أي أداة يظهر صراحة في رد الوكيل نفسه ويُسجل `run.tool_failures` — مفيش فشل وراء إجابة شكلها نجاح.
+- الـ runs المعلقة تتقفل تلقائيًا `zombie_reaped_by_guard` عند المسح.
+- قاعدة البيانات غير المتاحة تعني 503 صريحًا، والتقرير الصحي كل 20 ثانية + Health Watch كل 15 دقيقة.
 
 ## Environment variables
 

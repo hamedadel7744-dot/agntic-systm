@@ -4,10 +4,11 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Activity, AlertTriangle, ArrowLeft, Bot, CheckCircle2, Clock3, Database, KeyRound,
-  RefreshCw, Server, ShieldAlert, Wrench, XCircle,
+  RefreshCw, Server, ShieldAlert, ShieldCheck, Wrench, XCircle,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { CheckStatus, DiagCheck, DiagnosticsReport } from "../../../server/platform/diagnostics";
+import type { GuardFinding, GuardReport } from "../../../server/platform/guard";
 
 const GROUP_LABELS: Record<DiagCheck["group"], string> = {
   database: "قاعدة البيانات",
@@ -45,7 +46,30 @@ export default function Diagnostics() {
   useEffect(() => {
     if (manual && !report.isFetching) setManual(false);
   }, [manual, report.isFetching]);
+  const [guardBusy, setGuardBusy] = useState(false);
+  const [guardResult, setGuardResult] = useState<GuardReport | null>(null);
+  const [guardError, setGuardError] = useState("");
   const data: DiagnosticsReport | undefined = report.data;
+
+  const runGuard = async () => {
+    const token = localStorage.getItem("platformAdminToken") ?? "";
+    if (!token) {
+      setGuardError("محتاج توكن المدير — اكتبه أولًا في صفحة منصة التشغيل (بيتحفظ محليًا عندك).");
+      return;
+    }
+    setGuardBusy(true);
+    setGuardError("");
+    try {
+      const res = await fetch("/v1/system/guard", { method: "POST", headers: { "x-admin-token": token } });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body?.error?.message ?? "فشل تشغيل الحارس");
+      setGuardResult(body.data);
+    } catch (e) {
+      setGuardError((e as Error).message);
+    } finally {
+      setGuardBusy(false);
+    }
+  };
 
   const counts = { ok: 0, warn: 0, fail: 0 };
   for (const check of data?.checks ?? []) counts[check.status] += 1;
@@ -184,6 +208,37 @@ export default function Diagnostics() {
                     <p className="mt-2 text-xs leading-6 text-[#526079]">{incident.error}</p>
                   </div>
                 ))}
+              </CardContent>
+            </Card>
+
+            <Card className="mt-5 rounded-[26px] border-[#e7ebf2] bg-white shadow-sm">
+              <CardHeader>
+                <CardTitle className="flex items-center justify-between text-base font-black">
+                  <span className="flex items-center gap-2"><ShieldCheck className="h-4 w-4 text-[#198a6a]" />الحارس — ملاحظات هيكلية وذاتية الإصلاح</span>
+                  <Button onClick={runGuard} disabled={guardBusy} className="h-8 rounded-lg bg-[#101b35] px-3 text-[10px] font-bold text-white hover:bg-[#1b2c52]"><ShieldCheck className={`ml-1 h-3 w-3 ${guardBusy ? "animate-pulse" : ""}`} />{guardBusy ? "جارٍ المسح..." : "تشغيل الحارس الآن"}</Button>
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {guardResult && (
+                  <div className={`rounded-2xl border p-3 text-xs font-bold ${guardResult.reapedZombies > 0 ? "border-[#bfeedd] bg-[#f4fcf8] text-[#198a6a]" : "border-[#dfe6ee] bg-[#f7f8fb] text-[#526079]"}`}>
+                    آخر مسح: {formatTime(guardResult.ranAt)} — أعاد تأهيل {guardResult.reapedZombies} run معلق (زومبي).
+                  </div>
+                )}
+                {guardError && <div className="rounded-2xl border border-[#f3c2c2] bg-[#fdeeee] p-3 text-xs font-bold text-[#c0392b]">{guardError}</div>}
+                {(guardResult?.findings ?? data?.guardFindings ?? []).length === 0 && (
+                  <p className="text-xs text-[#98a4b5]">لا ملاحظات هيكلية — كل وكيل له نسخة، وكل عميل له وكيل ومفتاح نشط، وكل المعرفة مضمّنة.</p>
+                )}
+                {(guardResult?.findings ?? data?.guardFindings ?? []).map((finding: GuardFinding) => {
+                  const meta = STATUS_META[finding.severity === "fail" ? "fail" : "warn"];
+                  return (
+                    <div key={finding.id} className={`rounded-2xl border p-3 ${meta.bg} ${meta.border}`}>
+                      <div className={`text-xs font-black ${meta.text}`}>{finding.title}{typeof finding.count === "number" ? ` (${finding.count})` : ""}</div>
+                      <p className="mt-1 text-[11px] leading-5 text-[#526079]">{finding.detail}</p>
+                      <p className="mt-1 text-[11px] leading-5 text-[#198a6a]">الإصلاح: {finding.fix}</p>
+                    </div>
+                  );
+                })}
+                <p className="text-[10px] leading-5 text-[#98a4b5]">المسح بيتطلب توكن المدير، وبيعيد تأهيل الـ runs المعلقة تلقائيًا (زومبي أقدم من 15 دقيقة) بدل ما تلوث الإحصائيات للأبد.</p>
               </CardContent>
             </Card>
 
