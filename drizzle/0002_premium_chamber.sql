@@ -1,0 +1,2 @@
+ALTER TABLE "platformRuns" ADD COLUMN "idempotencyKey" varchar(255);--> statement-breakpoint
+CREATE UNIQUE INDEX "uq_platformRuns_tenant_idempotencyKey" ON "platformRuns" USING btree ("tenantId","idempotencyKey");

@@ -4,7 +4,48 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import { Loader2, Send, User, Sparkles } from "lucide-react";
 import { useState, useEffect, useRef } from "react";
-import { Streamdown } from "streamdown";
+import { Streamdown, defaultRehypePlugins } from "streamdown";
+import type { StreamdownProps } from "streamdown";
+
+/**
+ * Platform origin used to harden Streamdown link/image rendering.
+ * Keep in sync with the deployed app URL (see README).
+ */
+const PLATFORM_ORIGIN = "https://agntic-systm.vercel.app";
+
+type RehypePlugins = NonNullable<StreamdownProps["rehypePlugins"]>;
+
+/**
+ * Hardened rehype plugins replacing Streamdown's defaults.
+ *
+ * Streamdown 1.4.0 enables rehype-raw by default, so raw HTML coming from
+ * model output (script, iframe, style tags) is built into real DOM elements
+ * and executes in the browser. Passing a custom `rehypePlugins` list replaces
+ * the defaults entirely, so this list:
+ * - drops rehype-raw: raw HTML renders as inert escaped text instead of DOM;
+ * - keeps rehype-harden, but with the platform origin instead of the default
+ *   wildcard link/image prefixes, and data: URIs disabled;
+ * - keeps rehype-katex so math rendering still works.
+ */
+const hardenedRehypePlugins = [
+  // defaultRehypePlugins values are [plugin, options] tuples at runtime,
+  // even though the export types them loosely as `Pluggable`.
+  [
+    (
+      defaultRehypePlugins.harden as unknown as [
+        plugin: RehypePlugins[number],
+        settings: Record<string, unknown>
+      ]
+    )[0],
+    {
+      defaultOrigin: PLATFORM_ORIGIN,
+      allowedLinkPrefixes: [`${PLATFORM_ORIGIN}/`],
+      allowedImagePrefixes: [`${PLATFORM_ORIGIN}/`],
+      allowDataImages: false,
+    },
+  ],
+  defaultRehypePlugins.katex,
+] as RehypePlugins;
 
 /**
  * Message type matching server-side LLM Message interface
@@ -64,7 +105,9 @@ export type AIChatBoxProps = {
  *
  * Features:
  * - Matches server-side Message interface for seamless integration
- * - Markdown rendering with Streamdown
+ * - Markdown rendering with Streamdown (raw HTML from model output is
+ *   rendered as inert text, never as executable DOM; links/images are
+ *   restricted to the platform origin)
  * - Auto-scrolls to latest message
  * - Loading states
  * - Uses global theme colors from index.css
@@ -262,7 +305,9 @@ export function AIChatBox({
                     >
                       {message.role === "assistant" ? (
                         <div className="prose prose-sm dark:prose-invert max-w-none">
-                          <Streamdown>{message.content}</Streamdown>
+                          <Streamdown rehypePlugins={hardenedRehypePlugins}>
+                            {message.content}
+                          </Streamdown>
                         </div>
                       ) : (
                         <p className="whitespace-pre-wrap text-sm">

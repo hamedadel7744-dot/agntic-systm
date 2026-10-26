@@ -15,6 +15,20 @@
       "when": 1790852923241,
       "tag": "0001_shallow_ultimatum",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1793051816796,
+      "tag": "0002_premium_chamber",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1793053563193,
+      "tag": "0003_daffy_korvac",
+      "breakpoints": true
     }
   ]
 }

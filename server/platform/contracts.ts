@@ -56,6 +56,9 @@ export type RuntimeOutcome = {
   traceId: string;
   status: "succeeded" | "waiting_approval" | "failed";
   answer: string;
+  // Stable machine-readable failure code (run_failed, hard_cap_reached,
+  // agent_not_found, ...) so clients can branch without parsing the answer text.
+  errorCode?: string;
   tokensUsed: number;
   toolCalls: number;
 };

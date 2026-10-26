@@ -5,6 +5,12 @@ export interface RateBucket {
   resetAt: number;
 }
 
+/** Shared admission state for run executions: POST /v1/runs and the tRPC
+ * platform.run mutation draw from the same per-tenant buckets so one valid key
+ * cannot multiply the advertised limit by using both surfaces. */
+export const RUNS_RATE_LIMIT_PER_MIN = Number(process.env.RUNS_RATE_LIMIT_PER_MIN ?? 60);
+export const runsRateBuckets = new Map<string, RateBucket>();
+
 export function checkRateLimit(
   buckets: Map<string, RateBucket>,
   key: string,

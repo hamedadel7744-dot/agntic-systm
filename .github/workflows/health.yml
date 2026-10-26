@@ -18,11 +18,13 @@ jobs:
             process.stdin.on('end', () => {
               let r;
               try { r = JSON.parse(d); } catch { console.log('::error::Health endpoint returned non-JSON'); process.exit(1); }
-              const groups = ['database', 'schema', 'tools'];
-              const infraFail = (r.checks ?? []).some(c => groups.includes(c.group) && c.status === 'fail');
-              if (infraFail) {
-                const ids = (r.checks ?? []).filter(c => c.status === 'fail' && groups.includes(c.group)).map(c => c.id);
-                console.log('::error::Infrastructure failing: ' + ids.join(', ') + ' — open /api/system/health for causes and fixes');
+              if (r.status === 'fail') {
+                // env-group failing rows are hidden from this public endpoint; their
+                // impact still lands in the aggregate status, so fail on it directly.
+                const ids = (r.checks ?? []).filter(c => c.status === 'fail').map(c => c.id);
+                const label = ids.length > 0 ? ids.join(', ') : 'aggregate fail (failing rows are env-group, hidden from this endpoint)';
+                console.log('::error::Production failing: ' + label + ' — open /api/system/health for causes and fixes');
+                if (ids.includes('llm.config')) console.log('::error::llm.config failing — EVERY agent run now fails at invokeLLM (BUILT_IN_FORGE_API_KEY missing or rejected)');
                 process.exit(1);
               }
               if (r.status !== 'ok') {
@@ -30,3 +32,16 @@ jobs:
               }
             });
           "
+      - name: Notify Slack on failure
+        if: failure()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "::warning::SLACK_WEBHOOK_URL secret not set — Slack notification skipped (add it under Settings > Secrets and variables > Actions to enable paging)"
+            exit 0;
+          fi
+          RUN_URL="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          curl -sf -X POST -H 'Content-type: application/json' \
+            --data "{\"text\":\"Health Watch: production health check FAILED. run: ${RUN_URL} - health: https://agntic-systm.vercel.app/api/system/health\"}" \
+            "$SLACK_WEBHOOK_URL" || echo "::warning::Slack webhook call failed — page the on-call manually"

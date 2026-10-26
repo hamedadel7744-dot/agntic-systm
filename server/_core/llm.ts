@@ -69,6 +69,10 @@ export type InvokeParams = {
   model?: string;
   thinking?: Record<string, unknown>;
   reasoning?: Record<string, unknown>;
+  /** Optional caller-imposed total time budget in ms; defaults to the built-in
+   * LLM_TOTAL_BUDGET_MS. The runtime passes its remaining run budget here so a
+   * second LLM round can never push a run past the serverless invocation cap. */
+  budgetMs?: number;
 };
 
 export type ToolCall = {
@@ -307,20 +311,21 @@ const computeBackoffDelay = (
 // inside a serverless function lifetime instead of being killed mid-run and
 // leaving a zombie "running" row behind.
 const LLM_ATTEMPT_TIMEOUT_MS = 20_000;
-const LLM_TOTAL_BUDGET_MS = 45_000;
+export const LLM_TOTAL_BUDGET_MS = 45_000;
 
 const fetchWithBackoff = async (
   url: string,
-  init: FetchInit
+  init: FetchInit,
+  budgetMs: number = LLM_TOTAL_BUDGET_MS
 ): Promise<Response> => {
   let lastError: unknown;
   const startedAt = Date.now();
 
   for (let attempt = 0; attempt <= RETRY_MAX_RETRIES; attempt++) {
-    const remainingMs = LLM_TOTAL_BUDGET_MS - (Date.now() - startedAt);
+    const remainingMs = budgetMs - (Date.now() - startedAt);
     if (remainingMs <= 0) {
       throw new Error(
-        `LLM request exceeded its total time budget of ${LLM_TOTAL_BUDGET_MS}ms`
+        `LLM request exceeded its total time budget of ${budgetMs}ms`
       );
     }
     const attemptSignal = AbortSignal.timeout(
@@ -347,9 +352,9 @@ const fetchWithBackoff = async (
         `LLM request retry ${attempt + 1}/${RETRY_MAX_RETRIES} after status ${response.status}`
       );
       const delay = computeBackoffDelay(attempt, retryAfterMs);
-      if (Date.now() - startedAt + delay > LLM_TOTAL_BUDGET_MS) {
+      if (Date.now() - startedAt + delay > budgetMs) {
         throw new Error(
-          `LLM request exceeded its total time budget of ${LLM_TOTAL_BUDGET_MS}ms`
+          `LLM request exceeded its total time budget of ${budgetMs}ms`
         );
       }
       await sleep(delay);
@@ -360,7 +365,7 @@ const fetchWithBackoff = async (
         `LLM request retry ${attempt + 1}/${RETRY_MAX_RETRIES} after network error`
       );
       const delay = computeBackoffDelay(attempt);
-      if (Date.now() - startedAt + delay > LLM_TOTAL_BUDGET_MS) {
+      if (Date.now() - startedAt + delay > budgetMs) {
         break;
       }
       await sleep(delay);
@@ -389,6 +394,7 @@ export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
     reasoning,
     maxTokens,
     max_tokens,
+    budgetMs,
   } = params;
 
   const payload: Record<string, unknown> = {
@@ -441,7 +447,7 @@ export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
       authorization: `Bearer ${ENV.forgeApiKey}`,
     },
     body: JSON.stringify(payload),
-  });
+  }, budgetMs ?? LLM_TOTAL_BUDGET_MS);
 
   if (!response.ok) {
     const errorText = await response.text();

@@ -3,10 +3,7 @@ import { z } from "zod";
 import { executeRun, listPlatformTools } from "./runtime";
 import { findTenantByApiKey, resolveDefaultAgent } from "./db";
 import { getDb } from "../db";
-import { checkRateLimit, RateBucket } from "./rate-limit";
-
-const RUNS_RATE_LIMIT_PER_MIN = Number(process.env.RUNS_RATE_LIMIT_PER_MIN ?? 60);
-const runsRateBuckets = new Map<string, RateBucket>();
+import { checkRateLimit, RUNS_RATE_LIMIT_PER_MIN, runsRateBuckets } from "./rate-limit";
 
 const runSchema = z.object({ agentId: z.string().uuid().optional(), input: z.string().min(1).max(8000), conversationId: z.string().uuid().optional(), externalSessionId: z.string().max(255).optional(), metadata: z.record(z.string(), z.unknown()).optional() });
 
@@ -54,6 +51,10 @@ export function registerPlatformHttp(app: Express) {
     }
     const parsed = runSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: { code: "invalid_request", details: parsed.error.flatten() } });
+    // Stripe-style idempotency: the header is whitelisted in CORS above; a retry
+    // carrying the same key replays the original outcome instead of re-billing.
+    const idempotencyKey = req.header("idempotency-key")?.trim() || undefined;
+    if (idempotencyKey && idempotencyKey.length > 255) return res.status(400).json({ error: { code: "invalid_request", message: "مفتاح التكرار أطول من الحد المسموح (255 حرفًا)." } });
     // Key-only integration: without agentId, the tenant's default agent runs.
     let agentId = parsed.data.agentId;
     if (!agentId) {
@@ -61,8 +62,13 @@ export function registerPlatformHttp(app: Express) {
       if (!fallback) return res.status(404).json({ error: { code: "no_agent", message: "لا يوجد وكيل لهذا الحساب بعد — أنشئ وكيلًا من لوحة التحكم أو مرر agentId صريحًا." } });
       agentId = fallback.id;
     }
-    const outcome = await executeRun({ tenantId: resolved.tenant.id, agentId, input: parsed.data.input, conversationId: parsed.data.conversationId, externalSessionId: parsed.data.externalSessionId });
-    const statusCode = outcome.status === "failed" ? 422 : 200;
-    return res.status(statusCode).json({ data: outcome, agentId });
+    const outcome = await executeRun({ tenantId: resolved.tenant.id, agentId, input: parsed.data.input, conversationId: parsed.data.conversationId, externalSessionId: parsed.data.externalSessionId, idempotencyKey, metadata: parsed.data.metadata });
+    if (outcome.status === "failed") {
+      // Unified failure envelope: the same {error:{code,message,runId}} shape as
+      // auth/rate-limit failures, with a stable machine-readable code — the run
+      // reason is no longer buried inside a 422 success-shaped body.
+      return res.status(422).json({ error: { code: outcome.errorCode ?? "run_failed", message: outcome.answer, runId: outcome.runId } });
+    }
+    return res.status(200).json({ data: outcome, agentId });
   });
 }

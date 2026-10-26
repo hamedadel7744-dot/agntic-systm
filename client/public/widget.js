@@ -15,14 +15,19 @@
   button.style.cssText = "position:fixed;bottom:24px;right:24px;width:52px;height:52px;border:0;border-radius:18px;background:#101b35;color:#9af0d3;font-size:25px;box-shadow:0 12px 30px rgba(16,27,53,.22);z-index:2147483646;cursor:pointer";
   var panel = document.createElement("iframe");
   panel.title = "Nova Support Agent";
+  // The tenant key must never ride in the iframe URL: query strings land in server
+  // access logs, browser history and Referer headers. The embed page is served from
+  // agentUrl, so the key is handed over postMessage pinned to that origin once the
+  // iframe finishes loading.
   var embedUrl = agentUrl + "/embed?systemName=" + encodeURIComponent(agentName) + "&page=" + encodeURIComponent(page);
+  panel.src = embedUrl;
   if (agentKey) {
     // Key-only integration: agentId is optional — the server resolves the tenant's
     // default agent. Pass data-agent-id only to target a specific agent.
-    embedUrl += "&agentKey=" + encodeURIComponent(agentKey);
-    if (agentId) embedUrl += "&agentId=" + encodeURIComponent(agentId);
+    panel.addEventListener("load", function () {
+      panel.contentWindow.postMessage({ type: "nova:auth", agentKey: agentKey, agentId: agentId }, agentUrl);
+    });
   }
-  panel.src = embedUrl;
   panel.style.cssText = "display:none;position:fixed;bottom:88px;right:24px;width:min(420px,calc(100vw - 32px));height:min(680px,calc(100vh - 112px));border:0;border-radius:24px;box-shadow:0 24px 60px rgba(16,27,53,.24);z-index:2147483645;background:#f6f7fb";
   button.addEventListener("click", function () { panel.style.display = panel.style.display === "none" ? "block" : "none"; });
   document.body.appendChild(panel);

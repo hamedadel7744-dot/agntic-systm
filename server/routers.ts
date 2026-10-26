@@ -9,10 +9,21 @@ import { resolveDefaultAgent } from "./platform/db";
 import { addKnowledge, createAgent, createConnector, createTenant, createTenantApiKey, findTenantByApiKey, listConnectors, listPlatformOverview } from "./platform/db";
 import { runDiagnostics } from "./platform/diagnostics";
 import { executeRun, listPlatformTools } from "./platform/runtime";
+import { checkRateLimit, RUNS_RATE_LIMIT_PER_MIN, runsRateBuckets } from "./platform/rate-limit";
 import "./platform/default-tools";
 
-const chatMessageSchema = z.object({ role: z.enum(["user", "assistant", "system"]), content: z.string() });
+const chatMessageSchema = z.object({ role: z.enum(["user", "assistant", "system"]), content: z.string().max(2000) });
 const tenantInput = z.object({ tenantId: z.string().uuid(), agentId: z.string().uuid() });
+
+// Per-message schema caps still allow 12 history items to sum large; the history
+// actually sent to the model is bounded again here, trimming oldest-first.
+const HISTORY_TOTAL_CHAR_CAP = 12000;
+
+function trimHistoryToCap<T extends { content: string }>(messages: T[], cap: number): T[] {
+  let kept = messages;
+  while (kept.length > 0 && kept.reduce((sum, message) => sum + message.content.length, 0) > cap) kept = kept.slice(1);
+  return kept;
+}
 
 function fallbackAnswer(message: string) {
   const normalized = message.toLowerCase();
@@ -47,8 +58,8 @@ export const appRouter = router({
   }),
   knowledge: router({ list: publicProcedure.query(() => listKnowledgeSources()) }),
   ai: router({
-    chat: publicProcedure.input(z.object({ systemId: z.number().optional(), message: z.string().min(1), history: z.array(chatMessageSchema).max(12).optional(), currentPage: z.string().optional() })).mutation(async ({ input }) => {
-      const history = input.history ?? [];
+    chat: publicProcedure.input(z.object({ systemId: z.number().optional(), message: z.string().min(1).max(8000), history: z.array(chatMessageSchema).max(12).optional(), currentPage: z.string().max(200).optional() })).mutation(async ({ input }) => {
+      const history = trimHistoryToCap(input.history ?? [], HISTORY_TOTAL_CHAR_CAP);
       try {
         const response = await invokeLLM({ messages: [{ role: "system", content: `أنت وكيل دعم ذكي. أجب بالعربية المصرية الواضحة وباختصار عملي. النظام الحالي رقم ${input.systemId ?? "غير محدد"}. الصفحة الحالية: ${input.currentPage ?? "غير محددة"}. لا تخترع بيانات.` }, ...history, { role: "user", content: input.message }] });
         const content = response.choices?.[0]?.message?.content;
@@ -74,19 +85,26 @@ export const appRouter = router({
     createConnector: adminProcedure.input(z.object({ tenantId: z.string().uuid(), name: z.string().min(2), kind: z.enum(["rest", "graphql", "mcp", "webhook", "internal"]).optional(), baseUrl: z.string().url().optional().or(z.literal("")), capabilities: z.array(z.string()).min(1), secretRef: z.string().optional() })).mutation(({ input }) => createConnector({ ...input, baseUrl: input.baseUrl || undefined })),
     createAgent: adminProcedure.input(z.object({ tenantId: z.string().uuid(), name: z.string().min(2), description: z.string().optional(), systemPrompt: z.string().min(10) })).mutation(({ input }) => createAgent(input)),
     addKnowledge: adminProcedure.input(z.object({ tenantId: z.string().uuid(), agentId: z.string().uuid(), title: z.string().min(2).max(200), content: z.string().min(10).max(200000), sourceType: z.enum(["doc", "faq", "url"]).optional() })).mutation(({ input }) => addKnowledge(input)),
-    run: publicProcedure.input(z.object({ apiKey: z.string().min(10), agentId: z.string().uuid().optional(), input: z.string().min(1).max(8000), conversationId: z.string().uuid().optional(), externalSessionId: z.string().max(255).optional() })).mutation(async ({ input }) => {
+    run: publicProcedure.input(z.object({ apiKey: z.string().min(10), agentId: z.string().uuid().optional(), input: z.string().min(1).max(8000), conversationId: z.string().uuid().optional(), externalSessionId: z.string().max(255).optional(), idempotencyKey: z.string().max(255).optional() })).mutation(async ({ input, ctx }) => {
       // Loud failure only when the DB is configured but unreachable; in demo mode
       // (no DATABASE_URL) the key check below still runs and demo behavior applies.
-      if (process.env.DATABASE_URL && !(await getDb())) return { status: "failed" as const, answer: "قاعدة البيانات مضبوطة لكن غير قابلة للوصول الآن؛ الطلب مرفوض صراحة بدل الفشل الصامت. افتح صفحة صحة النظام للتفاصيل.", runId: "", traceId: "", tokensUsed: 0, toolCalls: 0 };
+      if (process.env.DATABASE_URL && !(await getDb())) return { status: "failed" as const, errorCode: "storage_unavailable", answer: "قاعدة البيانات مضبوطة لكن غير قابلة للوصول الآن؛ الطلب مرفوض صراحة بدل الفشل الصامت. افتح صفحة صحة النظام للتفاصيل.", runId: "", traceId: "", tokensUsed: 0, toolCalls: 0 };
       const resolved = await findTenantByApiKey(input.apiKey);
-      if (!resolved) return { status: "failed" as const, answer: "مفتاح API غير صالح أو tenant غير نشط.", runId: "", traceId: "", tokensUsed: 0, toolCalls: 0 };
+      if (!resolved) return { status: "failed" as const, errorCode: "invalid_api_key", answer: "مفتاح API غير صالح أو tenant غير نشط.", runId: "", traceId: "", tokensUsed: 0, toolCalls: 0 };
+      // Admission control shared with POST /v1/runs: same per-tenant bucket, same
+      // advertised limit — a valid key no longer bypasses it via the tRPC surface.
+      const rate = checkRateLimit(runsRateBuckets, resolved.tenant.id, RUNS_RATE_LIMIT_PER_MIN);
+      if (!rate.allowed) {
+        ctx.res.setHeader("Retry-After", String(rate.retryAfterSec));
+        return { status: "failed" as const, errorCode: "rate_limited", answer: `عدد الطلبات تجاوز الحد (${RUNS_RATE_LIMIT_PER_MIN} في الدقيقة لهذا الحساب). حاول بعد ${rate.retryAfterSec} ثانية.`, runId: "", traceId: "", tokensUsed: 0, toolCalls: 0 };
+      }
       let agentId = input.agentId;
       if (!agentId) {
         const fallback = await resolveDefaultAgent(resolved.tenant.id);
-        if (!fallback) return { status: "failed" as const, answer: "لا يوجد وكيل لهذا الحساب بعد — أنشئ وكيلًا من لوحة التحكم أو مرر agentId صريحًا.", runId: "", traceId: "", tokensUsed: 0, toolCalls: 0 };
+        if (!fallback) return { status: "failed" as const, errorCode: "no_agent", answer: "لا يوجد وكيل لهذا الحساب بعد — أنشئ وكيلًا من لوحة التحكم أو مرر agentId صريحًا.", runId: "", traceId: "", tokensUsed: 0, toolCalls: 0 };
         agentId = fallback.id;
       }
-      return executeRun({ tenantId: resolved.tenant.id, agentId, input: input.input, conversationId: input.conversationId });
+      return executeRun({ tenantId: resolved.tenant.id, agentId, input: input.input, conversationId: input.conversationId, externalSessionId: input.externalSessionId, idempotencyKey: input.idempotencyKey });
     }),
   }),
 });

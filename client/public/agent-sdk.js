@@ -10,7 +10,14 @@
         body: JSON.stringify({ agentId: options.agentId, input: input, conversationId: extra && extra.conversationId, metadata: extra && extra.metadata })
       });
       var payload = await response.json();
-      if (!response.ok) throw Object.assign(new Error(payload.error && payload.error.message || "Agent request failed"), { code: payload.error && payload.error.code, status: response.status });
+      if (!response.ok) {
+        // Unified failure contract: {error:{code,message,runId}} — with a fallback
+        // to the run outcome for older responses, so the real failure reason and
+        // its stable code are never lost behind a generic message.
+        var err = payload.error || {};
+        var data = payload.data || {};
+        throw Object.assign(new Error(err.message || data.answer || "Agent request failed"), { code: err.code || data.errorCode, status: response.status, runId: err.runId || data.runId });
+      }
       return payload.data;
     }
     return { run: run };

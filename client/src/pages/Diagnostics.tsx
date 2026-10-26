@@ -1,4 +1,5 @@
 import { trpc } from "@/lib/trpc";
+import { readAdminToken } from "@/lib/adminToken";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -52,9 +53,9 @@ export default function Diagnostics() {
   const data: DiagnosticsReport | undefined = report.data;
 
   const runGuard = async () => {
-    const token = localStorage.getItem("platformAdminToken") ?? "";
+    const token = readAdminToken();
     if (!token) {
-      setGuardError("محتاج توكن المدير — اكتبه أولًا في صفحة منصة التشغيل (بيتحفظ محليًا عندك).");
+      setGuardError("محتاج توكن المدير — اكتبه أولًا في صفحة منصة التشغيل (بيتحفظ مؤقتًا في جلسة المتصفح عندك).");
       return;
     }
     setGuardBusy(true);

@@ -1,4 +1,5 @@
-import { index, integer, pgTable, serial, text, timestamp, varchar, vector } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { index, integer, pgTable, serial, text, timestamp, uniqueIndex, varchar, vector } from "drizzle-orm/pg-core";
 
 /** Core identity table used by Manus OAuth. */
 export const users = pgTable("users", {
@@ -176,11 +177,16 @@ export const platformRuns = pgTable("platformRuns", {
   output: text("output"),
   error: text("error"),
   traceId: varchar("traceId", { length: 36 }).notNull(),
+  // Stripe-style replay protection: a retried run carrying the same key per
+  // tenant returns the original outcome instead of executing and charging again.
+  // NULL keys (most runs) never collide in a unique index.
+  idempotencyKey: varchar("idempotencyKey", { length: 255 }),
   tokensUsed: integer("tokensUsed").default(0).notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   completedAt: timestamp("completedAt"),
 }, (table) => [
   index("idx_platformRuns_tenant_created").on(table.tenantId, table.createdAt),
+  uniqueIndex("uq_platformRuns_tenant_idempotencyKey").on(table.tenantId, table.idempotencyKey),
 ]);
 
 export const platformActions = pgTable("platformActions", {
@@ -271,6 +277,11 @@ export const platformConversations = pgTable("platformConversations", {
   updatedAt: timestamp("updatedAt").defaultNow().notNull(),
 }, (table) => [
   index("idx_platformConversations_tenantId").on(table.tenantId),
+  // Partial unique index: at most one ACTIVE conversation per (tenant, agent,
+  // external session). NULL sessions never collide, and closing a conversation
+  // frees the session id for a new one. resolveConversation's insert relies on
+  // this to make concurrent first messages share one conversation.
+  uniqueIndex("uq_platformConversations_tenant_agent_session_active").on(table.tenantId, table.agentId, table.externalSessionId).where(sql`"status" = 'active'`),
 ]);
 
 export const platformMessages = pgTable("platformMessages", {

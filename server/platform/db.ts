@@ -1,6 +1,6 @@
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { getDb } from "../db";
-import { platformAgents, platformAgentVersions, platformApiKeys, platformConnectors, platformConversations, platformDeployments, platformEvents, platformKnowledge, platformMessages, platformRuns, platformTenants, platformToolCalls, platformUsage } from "../../drizzle/schema";
+import { platformActions, platformAgents, platformAgentVersions, platformApiKeys, platformConnectors, platformConversations, platformDeployments, platformEvents, platformKnowledge, platformMessages, platformRuns, platformTenants, platformToolCalls, platformUsage } from "../../drizzle/schema";
 import { hashApiKey, newId, safeJson } from "./identity";
 import { embedText, toVectorLiteral } from "./embeddings";
 
@@ -59,24 +59,84 @@ export async function resolveDefaultAgent(tenantId: string) {
   return (await db.select({ id: platformAgents.id, name: platformAgents.name }).from(platformAgents).where(eq(platformAgents.tenantId, tenantId)).orderBy(platformAgents.createdAt).limit(1))[0];
 }
 
-export async function createRun(input: { tenantId: string; agentId: string; input: string; traceId: string; conversationId?: string }) {
+export async function createRun(input: { tenantId: string; agentId: string; input: string; traceId: string; conversationId?: string; idempotencyKey?: string }) {
   const db = await getDb();
   const id = newId();
   if (!db) return { id, tenantId: input.tenantId, agentId: input.agentId, input: input.input, traceId: input.traceId, status: "queued" as const, tokensUsed: 0 };
-  await db.insert(platformRuns).values({ id, tenantId: input.tenantId, agentId: input.agentId, input: input.input, traceId: input.traceId, conversationId: undefined, conversationKey: input.conversationId });
+  // Race-safe claim: a concurrent retry with the same key loses this insert
+  // silently, then re-selects the winner's row instead of crashing on the
+  // unique index or creating a duplicate run.
+  await db.insert(platformRuns).values({ id, tenantId: input.tenantId, agentId: input.agentId, input: input.input, traceId: input.traceId, conversationId: undefined, conversationKey: input.conversationId, idempotencyKey: input.idempotencyKey }).onConflictDoNothing({ target: [platformRuns.tenantId, platformRuns.idempotencyKey] });
+  if (input.idempotencyKey) return (await db.select().from(platformRuns).where(and(eq(platformRuns.tenantId, input.tenantId), eq(platformRuns.idempotencyKey, input.idempotencyKey))).limit(1))[0];
   return (await db.select().from(platformRuns).where(and(eq(platformRuns.id, id), eq(platformRuns.tenantId, input.tenantId))).limit(1))[0];
 }
 
-export async function updateRun(tenantId: string, runId: string, patch: { status: "running" | "waiting_approval" | "succeeded" | "failed"; output?: string; error?: string; tokensUsed?: number }) {
+/** Idempotent replay lookup: the run previously created with the same key for
+ * this tenant (unique index makes it at most one). Returns in-flight rows too —
+ * the caller decides between replaying a terminal outcome and refusing a race. */
+export async function findRunByIdempotencyKey(tenantId: string, idempotencyKey: string) {
   const db = await getDb();
-  if (!db) return;
-  await db.update(platformRuns).set({ ...patch, completedAt: ["succeeded", "failed"].includes(patch.status) ? new Date() : undefined }).where(and(eq(platformRuns.id, runId), eq(platformRuns.tenantId, tenantId)));
+  if (!db) return undefined;
+  return (await db.select().from(platformRuns).where(and(eq(platformRuns.tenantId, tenantId), eq(platformRuns.idempotencyKey, idempotencyKey))).limit(1))[0];
 }
 
-export async function recordToolCall(input: { tenantId: string; runId: string; toolName: string; toolInput: unknown; status: "pending" | "success" | "failed" | "denied"; output?: unknown }) {
+/** Tool-call count of a past run, used to reconstruct a replayed outcome. */
+export async function countRunToolCalls(tenantId: string, runId: string) {
+  const db = await getDb();
+  if (!db) return 0;
+  const rows = await db.select({ total: sql<number>`count(*)::int` }).from(platformToolCalls).where(and(eq(platformToolCalls.tenantId, tenantId), eq(platformToolCalls.runId, runId)));
+  return rows[0]?.total ?? 0;
+}
+
+export async function updateRun(tenantId: string, runId: string, patch: { status: "running" | "waiting_approval" | "succeeded" | "failed" | "cancelled"; output?: string; error?: string; tokensUsed?: number }) {
   const db = await getDb();
   if (!db) return;
-  await db.insert(platformToolCalls).values({ id: newId(), tenantId: input.tenantId, runId: input.runId, toolName: input.toolName, input: safeJson(input.toolInput), output: input.output ? safeJson(input.output) : undefined, status: input.status });
+  await db.update(platformRuns).set({ ...patch, completedAt: ["succeeded", "failed", "cancelled"].includes(patch.status) ? new Date() : undefined }).where(and(eq(platformRuns.id, runId), eq(platformRuns.tenantId, tenantId)));
+}
+
+/** Admin kill switch for one run: flips a queued/running/waiting_approval run to
+ * cancelled so executeRun's cooperative probe between tool executions stops it at
+ * the next boundary. Terminal runs are untouched (cancel is not a state rewrite). */
+export async function cancelRun(tenantId: string, runId: string) {
+  const db = await getDb();
+  if (!db) return { cancelled: 0 };
+  const rows = await db.update(platformRuns).set({ status: "cancelled", completedAt: new Date() }).where(and(eq(platformRuns.id, runId), eq(platformRuns.tenantId, tenantId), inArray(platformRuns.status, ["queued", "running", "waiting_approval"]))).returning({ id: platformRuns.id });
+  return { cancelled: rows.length };
+}
+
+export async function findRunById(tenantId: string, runId: string) {
+  const db = await getDb();
+  if (!db) return undefined;
+  return (await db.select().from(platformRuns).where(and(eq(platformRuns.id, runId), eq(platformRuns.tenantId, tenantId))).limit(1))[0];
+}
+
+/** Cooperative kill-switch probe for the tool loop: re-reads the run row joined
+ * to its tenant so a run cancel — or the cancel/start write race, caught via
+ * completedAt already set on a still-"running" row — and a live tenant suspension
+ * stop a mid-flight run at the next tool boundary, not only at authentication.
+ * Returns the reason to stop, or null to continue. */
+export async function getRunInterrupt(tenantId: string, runId: string): Promise<"run_cancelled" | "tenant_suspended" | null> {
+  const db = await getDb();
+  if (!db) return null;
+  const rows = await db.select({ runStatus: platformRuns.status, completedAt: platformRuns.completedAt, tenantStatus: platformTenants.status }).from(platformRuns).innerJoin(platformTenants, eq(platformRuns.tenantId, platformTenants.id)).where(and(eq(platformRuns.id, runId), eq(platformRuns.tenantId, tenantId))).limit(1);
+  const row = rows[0];
+  // A vanished run row means the run can no longer be tracked — stop it.
+  if (!row || row.runStatus === "cancelled" || row.completedAt !== null) return "run_cancelled";
+  if (row.tenantStatus !== "active") return "tenant_suspended";
+  return null;
+}
+
+export async function recordToolCall(input: { tenantId: string; runId: string; toolName: string; toolInput: unknown; status: "pending" | "success" | "failed" | "denied"; output?: unknown; durationMs?: number }) {
+  const db = await getDb();
+  if (!db) return;
+  // No dedicated durationMs column (schema changes need a generated migration),
+  // so the measured latency rides on the row's output JSON for every status.
+  const output = input.durationMs === undefined
+    ? input.output
+    : input.output && typeof input.output === "object" && !Array.isArray(input.output)
+      ? { ...(input.output as Record<string, unknown>), durationMs: input.durationMs }
+      : { payload: input.output, durationMs: input.durationMs };
+  await db.insert(platformToolCalls).values({ id: newId(), tenantId: input.tenantId, runId: input.runId, toolName: input.toolName, input: safeJson(input.toolInput), output: output ? safeJson(output) : undefined, status: input.status });
 }
 
 export async function recordEvent(input: { tenantId: string; runId?: string; type: string; payload: unknown; traceId?: string }) {
@@ -85,27 +145,57 @@ export async function recordEvent(input: { tenantId: string; runId?: string; typ
   await db.insert(platformEvents).values({ id: newId(), tenantId: input.tenantId, runId: input.runId, eventType: input.type, payload: safeJson(input.payload), traceId: input.traceId });
 }
 
+/** Records a tool action awaiting a human decision so the approval path can
+ * resume the run later instead of dead-ending in waiting_approval forever. */
+export async function recordPlatformAction(input: { tenantId: string; runId: string; kind: string; proposal: unknown }) {
+  const db = await getDb();
+  const id = newId();
+  if (!db) return { id, tenantId: input.tenantId, runId: input.runId, kind: input.kind.slice(0, 128), proposal: safeJson(input.proposal), status: "proposed" as const, requiresApproval: 1, createdAt: new Date() };
+  await db.insert(platformActions).values({ id, tenantId: input.tenantId, runId: input.runId, kind: input.kind.slice(0, 128), proposal: safeJson(input.proposal), requiresApproval: 1 });
+  return (await db.select().from(platformActions).where(and(eq(platformActions.id, id), eq(platformActions.tenantId, input.tenantId))).limit(1))[0];
+}
+
+export async function getPlatformAction(tenantId: string, actionId: string) {
+  const db = await getDb();
+  if (!db) return undefined;
+  return (await db.select().from(platformActions).where(and(eq(platformActions.id, actionId), eq(platformActions.tenantId, tenantId))).limit(1))[0];
+}
+
+export async function setPlatformActionStatus(tenantId: string, actionId: string, status: "authorized" | "denied" | "executed" | "verified" | "failed") {
+  const db = await getDb();
+  if (!db) return { updated: 0 };
+  const rows = await db.update(platformActions).set({ status }).where(and(eq(platformActions.id, actionId), eq(platformActions.tenantId, tenantId))).returning({ id: platformActions.id });
+  return { updated: rows.length };
+}
+
 const BILLING_CYCLE_MS = 30 * 86400000;
 
 export async function chargeUsage(tenantId: string, tokens: number, toolCalls = 0) {
   const db = await getDb();
   if (!db) return { allowed: true, used: tokens, quota: 100000, cap: 120000, warning: false, overageTokens: 0 };
-  const current = (await db.select().from(platformTenants).where(eq(platformTenants.id, tenantId)).limit(1))[0];
-  if (!current) return { allowed: false, reason: "tenant_not_found" };
   const now = new Date();
-  const cycleExpired = now.getTime() - current.billingCycleStart.getTime() >= BILLING_CYCLE_MS;
-  // Atomic increment via SQL: a read-modify-write here loses tokens under concurrency.
-  // Tokens were really spent, so the cap is enforced AFTER incrementing (no refund).
+  // Cycle reset and normal increment are decided inside ONE update: both CASE
+  // branches read the same pre-update row, so two concurrent requests at a cycle
+  // boundary can never blind-overwrite each other (a read-then-reset could).
+  // Cycle expiry is expressed as billingCycleStart <= now - 30d, and the bounds
+  // are pre-serialized to UTC ISO strings to match how drizzle writes timestamps.
+  const nowIso = now.toISOString();
+  const cycleCutoffIso = new Date(now.getTime() - BILLING_CYCLE_MS).toISOString();
   const updated = await db.update(platformTenants).set(
-    cycleExpired
-      ? { billingCycleStart: now, tokenUsedThisCycle: tokens }
-      : { tokenUsedThisCycle: sql`${platformTenants.tokenUsedThisCycle} + ${tokens}` }
+    {
+      billingCycleStart: sql`case when ${platformTenants.billingCycleStart} <= ${cycleCutoffIso} then ${nowIso} else ${platformTenants.billingCycleStart} end`,
+      tokenUsedThisCycle: sql`case when ${platformTenants.billingCycleStart} <= ${cycleCutoffIso} then ${tokens} else ${platformTenants.tokenUsedThisCycle} + ${tokens} end`,
+    }
   ).where(eq(platformTenants.id, tenantId)).returning({ used: platformTenants.tokenUsedThisCycle, quota: platformTenants.tokenQuota, cap: platformTenants.hardCap, cycleStart: platformTenants.billingCycleStart });
   const row = updated[0];
   if (!row) return { allowed: false, reason: "tenant_not_found" };
-  if (row.used > row.cap) return { allowed: false, reason: "hard_cap_reached", message: `تم إيقاف الطلب لأن الحساب تجاوز السقف النهائي المسموح (${row.cap} توكن في الدورة).`, used: row.used, quota: row.quota, cap: row.cap };
+  // Tokens were really spent, so the usage ledger is written even when the
+  // request is rejected below for exceeding the hard cap — billing must match
+  // the tenant counter with no gap.
   const usageId = `${tenantId}-${row.cycleStart.getTime()}`;
   await db.insert(platformUsage).values({ id: usageId, tenantId, cycleStart: row.cycleStart, cycleEnd: new Date(row.cycleStart.getTime() + BILLING_CYCLE_MS), tokens, requests: 1, toolCalls }).onConflictDoUpdate({ target: platformUsage.id, set: { tokens: sql`${platformUsage.tokens} + ${tokens}`, requests: sql`${platformUsage.requests} + 1`, toolCalls: sql`${platformUsage.toolCalls} + ${toolCalls}` } });
+  // Cap enforced AFTER the increment and the ledger write (no refund).
+  if (row.used > row.cap) return { allowed: false, reason: "hard_cap_reached", message: `تم إيقاف الطلب لأن الحساب تجاوز السقف النهائي المسموح (${row.cap} توكن في الدورة).`, used: row.used, quota: row.quota, cap: row.cap };
   return { allowed: true, used: row.used, quota: row.quota, cap: row.cap, warning: row.used >= row.quota * 0.8, overageTokens: Math.max(0, row.used - row.quota) };
 }
 
@@ -125,6 +215,11 @@ export async function addKnowledge(input: { tenantId: string; agentId: string; t
   const db = await getDb();
   const id = newId();
   if (!db) return { id, ...input, status: "active" as const };
+  // Ownership check, mirroring createAgentVersion: without it a knowledge row
+  // can silently reference a missing or foreign agent and become unreachable
+  // for both listKnowledgeForAgent and searchKnowledge (no FKs exist here).
+  const agent = (await db.select({ id: platformAgents.id }).from(platformAgents).where(and(eq(platformAgents.id, input.agentId), eq(platformAgents.tenantId, input.tenantId))).limit(1))[0];
+  if (!agent) return { id, notFound: true as const };
   // Embedding is best-effort: without a provider key the row is still stored and
   // searchable via the keyword path.
   const embedding = await embedText(`${input.title}\n${input.content}`);
@@ -265,8 +360,16 @@ export async function resolveConversation(input: { tenantId: string; agentId: st
   }
   if (!conversation) {
     const id = newId();
-    await db.insert(platformConversations).values({ id, tenantId: input.tenantId, agentId: input.agentId, externalSessionId: input.externalSessionId });
-    conversation = (await db.select().from(platformConversations).where(and(eq(platformConversations.id, id), eq(platformConversations.tenantId, input.tenantId))).limit(1))[0];
+    // Race-safe create: the partial unique index (tenantId, agentId, externalSessionId)
+    // WHERE status='active' lets exactly one concurrent insert win; a loser skips
+    // the insert and re-reads the winner instead of forking a second conversation
+    // whose message history would split silently.
+    const inserted = await db.insert(platformConversations).values({ id, tenantId: input.tenantId, agentId: input.agentId, externalSessionId: input.externalSessionId }).onConflictDoNothing().returning({ id: platformConversations.id });
+    if (inserted[0]) {
+      conversation = (await db.select().from(platformConversations).where(and(eq(platformConversations.id, id), eq(platformConversations.tenantId, input.tenantId))).limit(1))[0];
+    } else if (input.externalSessionId) {
+      conversation = (await db.select().from(platformConversations).where(and(eq(platformConversations.tenantId, input.tenantId), eq(platformConversations.agentId, input.agentId), eq(platformConversations.externalSessionId, input.externalSessionId), eq(platformConversations.status, "active"))).orderBy(desc(platformConversations.updatedAt)).limit(1))[0];
+    }
   }
   const messages = conversation ? await db.select({ role: platformMessages.role, content: platformMessages.content }).from(platformMessages).where(and(eq(platformMessages.conversationId, conversation.id), eq(platformMessages.tenantId, input.tenantId))).orderBy(desc(platformMessages.createdAt)).limit(12) : [];
   return { id: conversation?.id ?? newId(), messages: messages.reverse() };

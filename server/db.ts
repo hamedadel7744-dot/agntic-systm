@@ -131,6 +131,18 @@ export async function getDashboardSnapshot() {
   }
 }
 
+// Ticket numbers draw from a 10-digit space (~9e9 values) instead of the old
+// 4-digit space, so collisions against the tickets_number_unique constraint are
+// rare; createTicket still retries on conflict and only returns a number that
+// was actually persisted.
+function generateTicketNumber() {
+  return `TKT-${Math.floor(1e9 + Math.random() * 9e9)}`;
+}
+
+function isUniqueViolation(error: unknown) {
+  return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "23505";
+}
+
 export async function createTicket(input: {
   systemId?: number;
   title: string;
@@ -140,28 +152,34 @@ export async function createTicket(input: {
   requesterName?: string;
   requesterEmail?: string;
 }) {
-  const number = `TKT-${Math.floor(1000 + Math.random() * 8999)}`;
   const db = await getDb();
   if (!db) {
-    return { id: Date.now(), number, ...input, category: input.category ?? "استخدام", priority: input.priority ?? "medium", status: "open", assignee: null, createdAt: new Date(), updatedAt: new Date() };
+    return { id: Date.now(), number: generateTicketNumber(), ...input, category: input.category ?? "استخدام", priority: input.priority ?? "medium", status: "open", assignee: null, createdAt: new Date(), updatedAt: new Date() };
   }
-  try {
-    await db.insert(tickets).values({
-      number,
-      systemId: input.systemId,
-      title: input.title,
-      description: input.description,
-      category: input.category ?? "استخدام",
-      priority: input.priority ?? "medium",
-      requesterName: input.requesterName,
-      requesterEmail: input.requesterEmail,
-    });
-    const result = await db.select().from(tickets).where(eq(tickets.number, number)).limit(1);
-    return result[0];
-  } catch (error) {
-    console.warn("[Database] Ticket fallback:", error);
-    return { id: Date.now(), number, ...input, category: input.category ?? "استخدام", priority: input.priority ?? "medium", status: "open", assignee: null, createdAt: new Date(), updatedAt: new Date() };
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const number = generateTicketNumber();
+    try {
+      await db.insert(tickets).values({
+        number,
+        systemId: input.systemId,
+        title: input.title,
+        description: input.description,
+        category: input.category ?? "استخدام",
+        priority: input.priority ?? "medium",
+        requesterName: input.requesterName,
+        requesterEmail: input.requesterEmail,
+      });
+      const result = await db.select().from(tickets).where(eq(tickets.number, number)).limit(1);
+      return result[0];
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        console.warn(`[Database] Ticket number collision on ${number}, retrying (${attempt}/3)`);
+        continue;
+      }
+      throw new Error(`Failed to save ticket to database: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
+  throw new Error("Failed to save ticket to database: ticket number collisions persisted after 3 attempts");
 }
 
 export async function listTickets() {
